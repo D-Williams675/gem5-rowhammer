@@ -337,7 +337,7 @@ DRAMInterface::checkRowHammer(Bank& bank_ref, MemPacket* mem_pkt)
         // delta. the user can set this value.
         // check this->row is an aggressor row and then check for its neighbors
         // this row can only be sandwiched if its > 1.
-        if (mem_pkt->row >= 1) {
+        if (mem_pkt->row >= 2) {
             if (bank_ref.aggressor_rows[mem_pkt->row]>=rowhammerThreshold/2 &&
                 bank_ref.aggressor_rows[mem_pkt->row-2]>=rowhammerThreshold/2){
                     single_sided = false;
