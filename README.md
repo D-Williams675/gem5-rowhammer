@@ -1,5 +1,7 @@
 # The gem5 Simulator
 
+TL;DR See Section [Using HammerSim](#using-hammersim) to play with RowHammer
+
 This is the repository for the gem5 simulator. It contains the full source code
 for the simulator and all tests and regressions.
 
@@ -66,7 +68,14 @@ The main source tree includes these subdirectories:
 
 ## Using HammerSim
 
-Please see `README-RH.md`.
+Key features:
+1. Variation maps for weak and strong capacitors.
+2. Uniform probabilities for single-sided, double-sided, half-double bit corruptions.
+3. Some TRR and other mitigations.
+4. Data corruption in the guest OS due to RowHammer attacks.
+5. Functional SECDED ECC implementation.
+
+Please see `README-RH.md` for full details.
 
 ## gem5 Resources
 
