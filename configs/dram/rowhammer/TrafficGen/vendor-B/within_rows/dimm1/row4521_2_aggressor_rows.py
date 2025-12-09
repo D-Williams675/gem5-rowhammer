@@ -1,4 +1,4 @@
-# Copyright (c) 2021-2023 The Regents of the University of California
+# Copyright (c) 2021-2025 The Regents of the University of California
 # All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without
@@ -25,31 +25,57 @@
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 from m5.objects import *
-import m5
-import os
+import m5, os
 
+# Need a couple of standard definitions for the rest of the script to work
+# without any issues.
+ROW_SIZE = 0x400
+TARGET_BANK = 0x4
+# Each tick is 1/4th of a pico-second
+MIN_PERIOD = 1230000
+MAX_PERIOD = 1520000
 
+# From our test set, row 4521 is vulnerable on DIMM 1.
+TARGET_ROW = 4521
+
+# We create a simple memory interface class for evaluating rowhammer
 class DRAM_TEST(DDR4_2400_8x8):
+    """
+    This class has 8 banks per rank.
+    The rowbuffer size is 1KiB
+    """
+    # Use the correct device map
+    device_file = os.path.join(os.getcwd(),
+                    "util/hammersim/row_experiment_vendor_b/dimm1.bank-4.json")
     ranks_per_channel = 1
-    # rowhammer_threshold = 3
+    # TRR is already bypassed to study vulnerable rows.
     trr_variant = 0
+    trr_threshold = 16834
+    rowhammer_threshold = 45000
     counter_table_length = 6
+    # companion_table_length = 6
+    rh_stat_dump = False
+    # There is a very high probability for a bitflip however, bitflips become
+    # highly likely as the rowhammer threshold is crossed.
+    half_double_prob = 1e18
+    # Modeling this based on DDR4 DIMMs
+    double_sided_prob = 1e16
+    # Single sided rowhammer is rare.
+    single_sided_prob = 1e18
+    synthetic_traffic = True
 
 
 duration = int(1e11)
-
 
 system = System()
 system.clk_domain = SrcClockDomain()
 system.clk_domain.clock = "4GHz"
 system.clk_domain.voltage_domain = VoltageDomain()
 system.mem_mode = "timing"
-system.mem_ranges = [AddrRange("256MB")]
+system.mem_ranges = [AddrRange("1GB")]
 
+system.generator0 = PyTrafficGen()
 system.generator1 = PyTrafficGen()
-system.generator2 = PyTrafficGen()
-system.generator3 = PyTrafficGen()
-system.generator4 = PyTrafficGen()
 
 system.mem_ctrl = MemCtrl()
 
@@ -57,77 +83,53 @@ system.mem_ctrl.dram = DRAM_TEST(range=system.mem_ranges[0])
 
 system.membus = L2XBar()
 
+system.membus.cpu_side_ports = system.generator0.port
 system.membus.cpu_side_ports = system.generator1.port
-system.membus.cpu_side_ports = system.generator2.port
-system.membus.cpu_side_ports = system.generator3.port
-system.membus.cpu_side_ports = system.generator4.port
+
+# for testing the victim row
+
 system.mem_ctrl.port = system.membus.mem_side_ports
-# system.mem_ctrl.dram.tREFI = "2000s"
 
-# system.mem_ctrl.port = system.generator1.port
-# system.mem_ctrl.port = system.generator2.port
+# Our victim bank from the collected device map is in bank 4.
+def get_data_chunk(row_number, width=8):
+    return row_number * 128
 
+# Addresses start from row 292 of bank 4.
+def createLinearTraffic0(tgen):
+    yield tgen.createLinear(
+        duration,  # duration
+        AddrRange(str(
+            get_data_chunk(TARGET_ROW - 1) + (8 * TARGET_BANK)) + "kB").end,
+        AddrRange(str(
+            get_data_chunk(TARGET_ROW - 1) + (8 * TARGET_BANK) + 1) + "kB").end,
+        64,  # block_size
+        MIN_PERIOD,  # min_period
+        MAX_PERIOD,  # max_period
+        100,  # rd_perc
+        0,
+    )  # data_limit
+    yield tgen.createExit(0)
 
 def createLinearTraffic1(tgen):
     yield tgen.createLinear(
         duration,  # duration
-        AddrRange("128kB").end,  # min_addr
-        AddrRange("135kB").end,  # max_adr
+        AddrRange(str(
+            get_data_chunk(TARGET_ROW + 1) + (8 * TARGET_BANK)) + "kB").end,
+        AddrRange(str(
+            get_data_chunk(TARGET_ROW + 1) + (8 * TARGET_BANK) + 1) + "kB").end,
         64,  # block_size
-        2000,  # min_period
-        2000,  # max_period
+        MIN_PERIOD,  # min_period
+        MAX_PERIOD,  # max_period
         100,  # rd_perc
         0,
     )  # data_limit
     yield tgen.createExit(0)
-
-
-def createLinearTraffic2(tgen):
-    yield tgen.createLinear(
-        duration,  # duration
-        AddrRange("384kB").end,  # min_addr
-        AddrRange("391kB").end,  # max_adr
-        64,  # block_size
-        2000,  # min_period
-        2000,  # max_period
-        100,  # rd_perc
-        0,
-    )  # data_limit
-    yield tgen.createExit(0)
-
-
-# ----- data -----
-def createLinearTraffic3(tgen):
-    yield tgen.createLinear(
-        duration,  # duration
-        AddrRange("256kB").end,  # min_addr
-        AddrRange("263kB").end,  # max_adr
-        64,  # block_size
-        1000000,  # min_period
-        1000000,  # max_period
-        100,  # rd_perc
-        0,
-    )  # data_limit
-    yield tgen.createExit(0)
-
-
-# def createLinearTraffic3(tgen):
-#     yield tgen.createLinear(10000000,   # duration
-#                             0,              # min_addr
-#                             AddrRange('1kB').end,              # max_adr
-#                             64,             # block_size
-#                             1000000,          # min_period
-#                             1000000,          # max_period
-#                             100,             # rd_perc
-#                             0)              # data_limit
-#     yield tgen.createExit(0)
-
 
 root = Root(full_system=False, system=system)
 
 m5.instantiate()
-system.generator4.start(createLinearTraffic1(system.generator4))
+
+system.generator0.start(createLinearTraffic0(system.generator0))
 system.generator1.start(createLinearTraffic1(system.generator1))
-system.generator2.start(createLinearTraffic2(system.generator2))
-system.generator3.start(createLinearTraffic3(system.generator3))
-exit_event = m5.simulate()
+
+m5.simulate()

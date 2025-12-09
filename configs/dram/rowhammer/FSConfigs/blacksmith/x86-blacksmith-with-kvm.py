@@ -44,6 +44,7 @@ import os
 from gem5.resources.resource import CustomResource, CustomDiskImageResource
 from gem5.utils.requires import requires
 from gem5.components.boards.x86_board import X86Board
+from gem5.components.boards.kernel_disk_workload import KernelDiskWorkload
 from gem5.components.memory.single_channel import SingleChannelDDR3_1600
 from gem5.components.processors.simple_switchable_processor import (
     SimpleSwitchableProcessor,
@@ -54,6 +55,37 @@ from gem5.coherence_protocol import CoherenceProtocol
 from gem5.resources.resource import Resource
 from gem5.simulate.simulator import Simulator
 from gem5.simulate.exit_event import ExitEvent
+
+from gem5.utils.override import overrides
+
+class Myboard(X86Board):
+
+    def __init__(
+        self,
+        clk_freq: str,
+        processor,
+        memory,
+        cache_hierarchy,
+    ) -> None:
+        super().__init__(
+            clk_freq=clk_freq,
+            processor=processor,
+            memory=memory,
+            cache_hierarchy=cache_hierarchy,
+        )
+    @overrides(KernelDiskWorkload)
+    def get_default_kernel_args(self):
+        return [
+            "earlyprintk=ttyS0",
+            "console=ttyS0",
+            "lpj=7999923",
+            "root=/dev/sda2",
+            "disk_device={disk_device}",
+            # "default_hugepagesz=2M",
+            # "hugepagesz=2M",
+            # "hugepages=512"
+            "memmap=2G!1G"
+        ]
 
 # This runs a check to ensure the gem5 binary is compiled to X86 and to the
 # MESI Two Level coherence protocol.
@@ -70,6 +102,13 @@ cache_hierarchy = PrivateL1PrivateL2CacheHierarchy(
 
 # Setup the system memory.
 memory = SingleChannelDDR3_1600(size="3GB")
+memory._dram_class.trr_variant = 0
+
+memory._dram_class.ranks_per_channel = 1
+memory._dram_class.rh_stat_dump = False
+memory._dram_class.half_double_prob = 1e7
+memory._dram_class.double_sided_prob = 1e5
+memory._dram_class.single_sided_prob = 1e4
 
 # Here we setup the processor. This is a special switchable processor in which
 # a starting core type and a switch core type must be specified. Once a
@@ -81,10 +120,11 @@ processor = SimpleSwitchableProcessor(
     starting_core_type=CPUTypes.KVM,
     switch_core_type=CPUTypes.TIMING,
     num_cores=2,
+    isa=ISA.X86
 )
 
 # Here we setup the board. The X86Board allows for Full-System X86 simulations.
-board = X86Board(
+board = Myboard(
     clk_freq="3GHz",
     processor=processor,
     memory=memory,
@@ -101,7 +141,10 @@ board = X86Board(
 # then, again, call `m5 exit` to terminate the simulation. After simulation
 # has ended you may inspect `m5out/system.pc.com_1.device` to see the echo
 # output.
-command = "rowhammer_test"
+command = ["echo rowhammer_test;",
+        "echo 12345 | sudo -S /home/gem5/rowhammer-test/rowhammer_test;"]
+
+# "rowhammer_test"
 # + "echo 'This is running on Timing CPU cores.';" \
 # + "sleep 1;"
 # + "m5 exit;"
@@ -110,16 +153,18 @@ board.set_kernel_disk_workload(
     # The x86 linux kernel will be automatically downloaded to the if not
     # already present.
     kernel=CustomResource(
-        os.path.join(
-            os.path.expanduser("~"), ".cache/gem5/x86-linux-kernel-5.4.49"
-        )
+        # os.path.join(
+            "/home/kaustavg/kernel/x86/linux-6.9.9/vmlinux"
+            # os.path.expanduser("~"), ".cache/gem5/x86-linux-kernel-5.4.49"
+        # )
     ),
     # The x86 ubuntu image will be automatically downloaded to the if not
     # already present.
     disk_image=CustomDiskImageResource(
-        os.path.join(os.getcwd(), "rh.img"), disk_root_partition="1"
+        os.path.join("/home/kaustavg/projects/kg-resources/src/rowhammer-fs/x86-disk-image-22-04/x86-ubuntu"),
+        root_partition="1"
     ),
-    readfile_contents=command,
+    readfile_contents=" ".join(command),
 )
 
 simulator = Simulator(
@@ -129,8 +174,11 @@ simulator = Simulator(
         # exit event. Instead of exiting the simulator, we just want to
         # switch the processor. The 2nd m5 exit after will revert to using
         # default behavior where the simulator run will exit.
-        ExitEvent.EXIT: (func() for func in [processor.switch]),
+        # ExitEvent.EXIT: (func() for func in [processor.switch]),
     },
 )
 simulator.run()
+simulator.run()
+simulator.run()
+# processor.switch()
 simulator.run()

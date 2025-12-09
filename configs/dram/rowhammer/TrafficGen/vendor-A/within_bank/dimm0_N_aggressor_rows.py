@@ -1,4 +1,4 @@
-# Copyright (c) 2021-2023 The Regents of the University of California
+# Copyright (c) 2021-2025 The Regents of the University of California
 # All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without
@@ -27,23 +27,46 @@
 from m5.objects import *
 import m5, os
 
+# Vendor A is a little complex to 
 
+# Need a couple of standard definitions for the rest of the script to work
+# without any issues.
+ROW_SIZE = 0x400
+TARGET_BANK = 0x4
+# Each tick is 1/4th of a pico-second
+MIN_PERIOD = 1230000
+MAX_PERIOD = 1600000
+
+# From our test set, row 7292 is vulnerable across all the 10 DIMMs of vendor B
+
+# We create a simple memory interface class for evaluating rowhammer
 class DRAM_TEST(DDR4_2400_8x8):
+    """
+    This class has 8 banks per rank.
+    The rowbuffer size is 1KiB
+    """
+    # Use the correct device map
+    device_file = os.path.join(os.getcwd(),
+                    "util/hammersim/row_experiment_vendor_b/dimm0.bank-4.json")
     ranks_per_channel = 1
-    # rowhammer_threshold = 3
-    trr_variant = 0
+    # TRR is modeled based on Vendor B.
+    trr_variant = 6
     trr_threshold = 16834
+    rowhammer_threshold = 45000
     counter_table_length = 6
-    companion_table_length = 6
+    # companion_table_length = 6
     rh_stat_dump = False
-    half_double_prob = 1e7
-    double_sided_prob = 1e1
-    single_sided_prob = int(1e5)
+    # There is a very high probability for a bitflip however, bitflips become
+    # highly likely as the rowhammer threshold is crossed.
+    half_double_prob = 1e18
+    # Modeling this based on DDR4 DIMMs
+    double_sided_prob = 1e16
+    # Single sided rowhammer is rare.
+    single_sided_prob = 1e18
     synthetic_traffic = True
 
 
 duration = int(1e11)
-
 
 system = System()
 system.clk_domain = SrcClockDomain()
@@ -60,7 +83,6 @@ system.generator4 = PyTrafficGen()
 system.generator5 = PyTrafficGen()
 system.generator6 = PyTrafficGen()
 system.generator7 = PyTrafficGen()
-system.generator8 = PyTrafficGen()
 
 system.mem_ctrl = MemCtrl()
 
@@ -79,40 +101,36 @@ system.membus.cpu_side_ports = system.generator7.port
 
 # for testing the victim row
 
-system.membus.cpu_side_ports = system.generator8.port
-
 system.mem_ctrl.port = system.membus.mem_side_ports
 
-
+# Our victim bank from the collected device map is in bank 4.
 def get_data_chunk(row_number, width=8):
     return row_number * 128
 
-
+# Addresses start from row 292 of bank 4.
 def createLinearTraffic0(tgen):
     yield tgen.createLinear(
         duration,  # duration
-        AddrRange("37376kB").end,  # min_addr
-        AddrRange("37383kB").end,  # max_adr
+        AddrRange(str(get_data_chunk(292) + (8 * TARGET_BANK)) + "kB").end,
+        AddrRange(
+            str(get_data_chunk(292) + (8 * TARGET_BANK) + 1) + "kB").end,
         64,  # block_size
-        2000,  # min_period
-        2000,  # max_period
+        MIN_PERIOD,  # min_period
+        MAX_PERIOD,  # max_period
         100,  # rd_perc
         0,
     )  # data_limit
     yield tgen.createExit(0)
 
-
-#
-
-
 def createLinearTraffic1(tgen):
     yield tgen.createLinear(
         duration,  # duration
-        AddrRange("37632kB").end,  # min_addr
-        AddrRange("37639kB").end,  # max_adr
+        AddrRange(str(get_data_chunk(294) + (8 * TARGET_BANK)) + "kB").end,
+        AddrRange(
+            str(get_data_chunk(294) + (8 * TARGET_BANK) + 1) + "kB").end,
         64,  # block_size
-        2000,  # min_period
-        2000,  # max_period
+        MIN_PERIOD,  # min_period
+        MAX_PERIOD,  # max_period
         100,  # rd_perc
         0,
     )  # data_limit
@@ -122,11 +140,12 @@ def createLinearTraffic1(tgen):
 def createLinearTraffic2(tgen):
     yield tgen.createLinear(
         duration,  # duration
-        AddrRange(str(get_data_chunk(2755)) + "kB").end,  # min_addr
-        AddrRange(str(get_data_chunk(2755) + 7) + "kB").end,  # max_adr
+        AddrRange(str(get_data_chunk(7291) + (8 * TARGET_BANK)) + "kB").end,
+        AddrRange(
+            str(get_data_chunk(7291) + (8 * TARGET_BANK) + 1) + "kB").end,
         64,  # block_size
-        2000,  # min_period
-        2000,  # max_period
+        MIN_PERIOD,  # min_period
+        MAX_PERIOD,  # max_period
         100,  # rd_perc
         0,
     )  # data_limit
@@ -139,11 +158,12 @@ def createLinearTraffic2(tgen):
 def createLinearTraffic3(tgen):
     yield tgen.createLinear(
         duration,  # duration
-        AddrRange(str(get_data_chunk(2757)) + "kB").end,  # min_addr
-        AddrRange(str(get_data_chunk(2757) + 7) + "kB").end,  # max_adr
+        AddrRange(str(get_data_chunk(7293) + (8 * TARGET_BANK)) + "kB").end,
+        AddrRange(
+            str(get_data_chunk(7293) + (8 * TARGET_BANK) + 1) + "kB").end,
         64,  # block_size
-        2000,  # min_period
-        2000,  # max_period
+        MIN_PERIOD,  # min_period
+        MAX_PERIOD,  # max_period
         100,  # rd_perc
         0,
     )  # data_limit
@@ -153,11 +173,12 @@ def createLinearTraffic3(tgen):
 def createLinearTraffic4(tgen):
     yield tgen.createLinear(
         duration,  # duration
-        AddrRange(str(get_data_chunk(8023)) + "kB").end,  # min_addr
-        AddrRange(str(get_data_chunk(8023) + 7) + "kB").end,  # max_adr
+        AddrRange(str(get_data_chunk(2755) + (8 * TARGET_BANK)) + "kB").end,
+        AddrRange(
+            str(get_data_chunk(2755) + (8 * TARGET_BANK) + 1) + "kB").end,
         64,  # block_size
-        2000,  # min_period
-        2000,  # max_period
+        MIN_PERIOD,  # min_period
+        MAX_PERIOD,  # max_period
         100,  # rd_perc
         0,
     )  # data_limit
@@ -170,11 +191,12 @@ def createLinearTraffic4(tgen):
 def createLinearTraffic5(tgen):
     yield tgen.createLinear(
         duration,  # duration
-        AddrRange(str(get_data_chunk(8025)) + "kB").end,  # min_addr
-        AddrRange(str(get_data_chunk(8025) + 7) + "kB").end,  # max_adr
+        AddrRange(str(get_data_chunk(2757) + (8 * TARGET_BANK)) + "kB").end,
+        AddrRange(
+            str(get_data_chunk(2757) + (8 * TARGET_BANK) + 1) + "kB").end,
         64,  # block_size
-        2000,  # min_period
-        2000,  # max_period
+        MIN_PERIOD,  # min_period
+        MAX_PERIOD,  # max_period
         100,  # rd_perc
         0,
     )  # data_limit
@@ -184,11 +206,12 @@ def createLinearTraffic5(tgen):
 def createLinearTraffic6(tgen):
     yield tgen.createLinear(
         duration,  # duration
-        AddrRange(str(get_data_chunk(8136)) + "kB").end,  # min_addr
-        AddrRange(str(get_data_chunk(8136) + 7) + "kB").end,  # max_adr
+        AddrRange(str(get_data_chunk(8136) + (8 * TARGET_BANK)) + "kB").end,
+        AddrRange(
+            str(get_data_chunk(8136) + (8 * TARGET_BANK) + 1) + "kB").end,
         64,  # block_size
-        2000,  # min_period
-        2000,  # max_period
+        MIN_PERIOD,  # min_period
+        MAX_PERIOD,  # max_period
         100,  # rd_perc
         0,
     )  # data_limit
@@ -201,29 +224,17 @@ def createLinearTraffic6(tgen):
 def createLinearTraffic7(tgen):
     yield tgen.createLinear(
         duration,  # duration
-        AddrRange(str(get_data_chunk(8138)) + "kB").end,  # min_addr
-        AddrRange(str(get_data_chunk(8138) + 7) + "kB").end,  # max_adr
+        AddrRange(str(get_data_chunk(8138) + (8 * TARGET_BANK)) + "kB").end,
+        AddrRange(
+            str(get_data_chunk(8138) + (8 * TARGET_BANK) + 1) + "kB").end,
         64,  # block_size
-        2000,  # min_period
-        2000,  # max_period
+        MIN_PERIOD,  # min_period
+        MAX_PERIOD,  # max_period
         100,  # rd_perc
         0,
     )  # data_limit
     yield tgen.createExit(0)
 
-
-# ----- data -----
-def createLinearTraffic8(tgen):
-    print(m5.curTick())
-    yield tgen.createLinear(duration,   # duration
-                            AddrRange(str(get_data_chunk(293)) + "kB").start,              # min_addr
-                            AddrRange(str(get_data_chunk(293) + 7) + "kB").end,              # max_adr
-                            64,             # block_size
-                            1000000,          # min_period
-                            1000000,          # max_period
-                            100,             # rd_perc
-                            0)              # data_limit
-    yield tgen.createExit(0)
 
 root = Root(full_system=False, system=system)
 
@@ -238,9 +249,4 @@ system.generator5.start(createLinearTraffic5(system.generator5))
 system.generator6.start(createLinearTraffic6(system.generator6))
 system.generator7.start(createLinearTraffic7(system.generator7))
 
-system.generator8.start(createLinearTraffic8(system.generator8))
-m5.simulate(5_000_000_000)
-# system.mem_ctrl.dram.dump("mem.bin")
-# m5.checkpoint()
-m5.debug.flags["MemoryAccess"].enable()
-exit_event = m5.simulate(6_000_000_000)
+m5.simulate()
