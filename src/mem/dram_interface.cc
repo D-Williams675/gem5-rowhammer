@@ -42,6 +42,7 @@
 #include "base/bitfield.hh"
 #include "base/cprintf.hh"
 #include "base/trace.hh"
+
 #include "debug/DRAM.hh"
 #include "debug/DRAMAddr.hh"
 #include "debug/DRAMPower.hh"
@@ -50,6 +51,9 @@
 #include "debug/RhBitflip.hh"
 #include "debug/RhInhibitor.hh"
 #include "debug/RowHammer.hh"
+#include "debug/RhCorruption.hh"
+#include "debug/ECC.hh"
+
 #include "sim/system.hh"
 
 namespace gem5
@@ -206,10 +210,20 @@ DRAMInterface::checkRowHammer(Bank& bank_ref, MemPacket* mem_pkt)
             struct timeval time;
             gettimeofday(&time,NULL);
 
-            srand((time.tv_sec * 1000) + (time.tv_usec / 1000));
+            // srand((time.tv_sec * 1000) + (time.tv_usec / 1000));
             // srand(time(nullptr));
-            uint64_t prob = rand() % halfDoubleProb + 1;
-            if (prob <= 1)
+            // uint64_t prob = rand() % (halfDoubleProb * 10) + 1;
+            uint64_t prob = hd_distribution(generator);
+
+            if (syntheticTraffic) {
+                // mix this distribution with another distribution to
+                // slow the bitflips as traffic generators do not capture
+                // the real life equivalent
+                prob *= another_distribution(generator);
+            }
+
+            // shall we make 
+            if (prob == 1)
                 bitflip = true;
 
             // now search for the device_map whether this row is weak or not
@@ -247,10 +261,17 @@ DRAMInterface::checkRowHammer(Bank& bank_ref, MemPacket* mem_pkt)
             if (bitflip) {
                 // This is a half-double bitflip. This will only appear if
                 // HDBitflip is enabled.
+                stats.rowHammerTotalBitflips++;
+                stats.rowHammerHalfDoubleBitflips++;
+
                 DPRINTF(HDBitflip,
-                        "HD Bitflip at %#x, bank %d, row %d, col %d\n",
-                        mem_pkt->addr + col, bank_ref.bank, mem_pkt->row - 2,
+                        "HD Bitflip at bank %d, row %d, col %d\n",
+                        bank_ref.bank, mem_pkt->row - 2,
                         col);
+                if (enableMemoryCorruption)
+                    doMemoryCorruption(mem_pkt, bank_ref.bank,
+                                                    mem_pkt->row - 2, col, -2);
+
             }
         }
     }
@@ -273,23 +294,21 @@ DRAMInterface::checkRowHammer(Bank& bank_ref, MemPacket* mem_pkt)
             struct timeval time;
             gettimeofday(&time,NULL);
 
-            srand((time.tv_sec * 1000) + (time.tv_usec / 1000));
-            uint64_t prob = rand() % halfDoubleProb + 1;
-            if (prob <= 1)
+            // srand((time.tv_sec * 1000) + (time.tv_usec / 1000));
+            // uint64_t prob = rand() % (halfDoubleProb * 10) + 1;
+
+            uint64_t prob = hd_distribution(generator);
+
+            if (syntheticTraffic) {
+                // mix this distribution with another distribution to
+                // slow the bitflips as traffic generators do not capture
+                // the real life equivalent
+                prob *= another_distribution(generator);
+            }
+            if (prob == 1)
                 bitflip = true;
 
             // TODO: We need to flip a bit in the MemPacket for row +- 2
-
-            // if (bank_ref.weakColumns[mem_pkt->row + 2].test(0)) {
-            //     // this condition needs to be fixed/verified.
-            //     mem_pkt->corruptedAccess = true;
-            //     bank_ref.weakColumns[mem_pkt->row + 2].reset(0);
-            //     if (bitflip) {
-            //         mem_pkt->corruptedAccess = true;
-            //         bank_ref.weakColumns[mem_pkt->row - 2].reset(0);
-            //     }
-            // }
-
             uint16_t col;
             if (device_map["0"][std::to_string(bank_ref.bank)]
                     [std::to_string(mem_pkt->row + 2)] != nullptr) {
@@ -310,11 +329,19 @@ DRAMInterface::checkRowHammer(Bank& bank_ref, MemPacket* mem_pkt)
             else
                 bitflip = false;
 
-            if (bitflip)
+            if (bitflip) {
+                stats.rowHammerTotalBitflips++;
+                stats.rowHammerHalfDoubleBitflips++;
+
                 DPRINTF(HDBitflip,
-                        "HD Bitflip at %#x, bank %d, row %d, col %d\n",
-                        mem_pkt->addr + col, bank_ref.bank, mem_pkt->row + 2,
+                        "HD Bitflip at bank %d, row %d, col %d\n",
+                        bank_ref.bank, mem_pkt->row + 2,
                         col);
+                
+                if (enableMemoryCorruption)
+                    doMemoryCorruption(mem_pkt, bank_ref.bank,
+                                                    mem_pkt->row + 2, col, 2);
+            }
 
         }
     }
@@ -351,9 +378,22 @@ DRAMInterface::checkRowHammer(Bank& bank_ref, MemPacket* mem_pkt)
 
         if (single_sided) {
             // tunable probability
-            srand((time.tv_sec * 1000) + (time.tv_usec / 1000));
-            uint64_t prob = rand() % singleSidedProb + 1;
-            if (prob <= 1)
+            // srand((time.tv_sec * 1000) + (time.tv_usec / 1000));
+            // uint64_t prob = rand() % (singleSidedProb * 10) + 1;
+            uint64_t prob = single_sided_distribution(generator);
+
+            if (syntheticTraffic) {
+                // mix this distribution with another distribution to
+                // slow the bitflips as traffic generators do not capture
+                // the real life equivalent
+                prob *= ((another_distribution(generator) * 
+                                        another_distribution(generator)));
+                // mkae sure that modulo is also zero
+                if ((bank_ref.rhTriggers[mem_pkt->row][1] % 
+                                            rowhammerThreshold) != 0)
+                    prob = 0;
+            }
+            if (prob == 1)
                 // flip a bit!
                 bitflip_status = true;
             // single sided bitflip should cause bitflips on both sides of the
@@ -367,15 +407,28 @@ DRAMInterface::checkRowHammer(Bank& bank_ref, MemPacket* mem_pkt)
             //     bank_ref.weakColumns[mem_pkt->row + 1].reset(0);
             // }{
 
-            // we need to flip a bit depending upon some probability
-            // struct timeval time;
-            gettimeofday(&time,NULL);
 
-            srand((time.tv_sec * 1000) + (time.tv_usec / 1000));
+            // srand((time.tv_sec * 1000) + (time.tv_usec / 1000));
 
-            uint64_t prob = rand() % doubleSidedProb + 1;
-            if (prob > 1)
-                bitflip_status = false;
+            // uint64_t prob = rand() % (doubleSidedProb * 10) + 1;
+            // ignore overflow. multiples equaling to 1 is very rare
+            uint64_t prob = double_sided_distribution(generator);
+
+
+            if (syntheticTraffic) {
+                // mix this distribution with another distribution to
+                // slow the bitflips as traffic generators do not capture
+                // the real life equivalent
+                prob *= ((another_distribution(generator) *
+                                        another_distribution(generator)));
+                // mkae sure that modulo is also zero
+                if ((bank_ref.rhTriggers[mem_pkt->row][1] %
+                                                rowhammerThreshold) != 0)
+                    prob = 0;
+            }
+            if (prob == 1)
+                // flip a bit!
+                bitflip_status = true;
         }
 
         uint16_t col;
@@ -402,13 +455,17 @@ DRAMInterface::checkRowHammer(Bank& bank_ref, MemPacket* mem_pkt)
 
 
             if (bitflip_status) {
+                stats.rowHammerTotalBitflips++;
+                if (single_sided == 1)
+                    stats.rowHammerSingleSidedBitflips++;
+                else
+                    stats.rowHammerDoubleSidedBitflips++;
                 if (rhStatDump) {
                     std::ofstream outfile;
                     outfile.open(rhStatFile,
                             std::ios::out | std::ios::app);
 
-                    outfile << "Bitflip at 0x" << std::hex <<
-                            mem_pkt->addr + col << std::dec << " bank " <<
+                    outfile << "Bitflip at bank " <<
                             (int)bank_ref.bank << " row " << mem_pkt->row - 1
                             << " col " << col << " single-sided " <<
                             single_sided << std::endl;
@@ -416,9 +473,14 @@ DRAMInterface::checkRowHammer(Bank& bank_ref, MemPacket* mem_pkt)
                     outfile.close();
                 }
                 DPRINTF(RhBitflip,
-                  "Bitflip at %#x, bank %d, row %d, col %d, single-sided %d\n",
-                  mem_pkt->addr + col, bank_ref.bank, mem_pkt->row - 1,
+                  "Bitflip at bank %d, row %d, col %d, single-sided %d\n",
+                  bank_ref.bank, mem_pkt->row - 1,
                   col, single_sided);
+
+                if (enableMemoryCorruption)
+                    doMemoryCorruption(mem_pkt, bank_ref.bank,
+                                                    mem_pkt->row - 1, col, -1);
+
 
                 // Also, need to figure out if the accessed
                 // column is flippable or not, and if it has
@@ -483,9 +545,22 @@ DRAMInterface::checkRowHammer(Bank& bank_ref, MemPacket* mem_pkt)
         gettimeofday(&time,NULL);
         if (single_sided) {
             // tunable probability
-            srand((time.tv_sec * 1000) + (time.tv_usec / 1000));
-            uint64_t prob = rand() % singleSidedProb + 1;
-            if (prob <= 10)
+            // srand((time.tv_sec * 1000) + (time.tv_usec / 1000));
+            // uint64_t prob = rand() % (singleSidedProb * 10) + 1;
+            uint64_t prob = single_sided_distribution(generator);
+
+            if (syntheticTraffic) {
+                // mix this distribution with another distribution to
+                // slow the bitflips as traffic generators do not capture
+                // the real life equivalent
+                prob *= ((another_distribution(generator) *
+                            another_distribution(generator)));
+                // make sure that modulo is also zero
+                if ((bank_ref.rhTriggers[mem_pkt->row][2] %
+                                                 rowhammerThreshold) != 0)
+                    prob = 0;
+            }
+            if (prob == 1)
                 // flip a bit!
                 bitflip_status = true;
         }
@@ -493,14 +568,25 @@ DRAMInterface::checkRowHammer(Bank& bank_ref, MemPacket* mem_pkt)
 
         if (!single_sided) {
             // we need to flip a bit depending upon some probability
-            // struct timeval time;
-            gettimeofday(&time,NULL);
 
-            srand((time.tv_sec * 1000) + (time.tv_usec / 1000));
-            // srand(time(nullptr));
-            uint64_t prob = rand() % doubleSidedProb + 1;
-            if (prob > 1)
-                bitflip_status = false;
+            // srand((time.tv_sec * 1000) + (time.tv_usec / 1000));
+            // uint64_t prob = rand() % (doubleSidedProb * 10) + 1;
+            uint64_t prob = double_sided_distribution(generator);
+
+            if (syntheticTraffic) {
+                // mix this distribution with another distribution to
+                // slow the bitflips as traffic generators do not capture
+                // the real life equivalent
+                prob *= (another_distribution(generator) *
+                            another_distribution(generator));
+                // mkae sure that modulo is also zero
+                if (bank_ref.rhTriggers[mem_pkt->row][2] % rowhammerThreshold
+                                                                        != 0)
+                    prob = 0;
+            }
+            if (prob == 1)
+                // flip a bit!
+                bitflip_status = true;
         }
 
         uint16_t col;
@@ -509,6 +595,7 @@ DRAMInterface::checkRowHammer(Bank& bank_ref, MemPacket* mem_pkt)
                 [std::to_string(mem_pkt->row + 1)] != nullptr) {
 
                 srand((time.tv_sec * 1000) + (time.tv_usec / 1000));
+
                 uint16_t col_idx = rand() % (uint16_t)device_map["0"]
                     [std::to_string(bank_ref.bank)]
                     [std::to_string(mem_pkt->row + 1)].size();
@@ -524,14 +611,17 @@ DRAMInterface::checkRowHammer(Bank& bank_ref, MemPacket* mem_pkt)
                 bitflip_status = false;
 
             if (bitflip_status) {
+                stats.rowHammerTotalBitflips++;
+                if (single_sided == 1)
+                    stats.rowHammerSingleSidedBitflips++;
+                else
+                    stats.rowHammerDoubleSidedBitflips++;
                 if (rhStatDump) {
                     std::ofstream outfile;
                     outfile.open(rhStatFile,
                             std::ios::out | std::ios::app);
 
-                    outfile << "Bitflip at 0x" << std::hex <<
-                            mem_pkt->addr + col <<
-                            std::dec << " bank " << (int)bank_ref.bank
+                    outfile << "Bitflip at bank " << (int)bank_ref.bank
                             << " row "
                             << mem_pkt->row + 1 << " col " << col
                             << " single-sided " << single_sided << std::endl;
@@ -539,10 +629,13 @@ DRAMInterface::checkRowHammer(Bank& bank_ref, MemPacket* mem_pkt)
                     outfile.close();
                 }
                 DPRINTF(RhBitflip,
-                    "Bitflip at %#x, bank %d, row %d, col %d, single-sided \
+                    "Bitflip at bank %d, row %d, col %d, single-sided \
                     %d\n",
-                    mem_pkt->addr + col, bank_ref.bank, mem_pkt->row + 1, col,
+                    bank_ref.bank, mem_pkt->row + 1, col,
                     single_sided);
+                if (enableMemoryCorruption)
+                    doMemoryCorruption(mem_pkt, bank_ref.bank,
+                                                    mem_pkt->row + 1, col, 1);
 
                 // Also, need to figure out if the accessed
                 // column is flippable or not, and if it has
@@ -569,6 +662,102 @@ DRAMInterface::checkRowHammer(Bank& bank_ref, MemPacket* mem_pkt)
             }
         }
     }
+}
+
+void
+DRAMInterface::doMemoryCorruption(MemPacket* mem_pkt, uint8_t bank,
+                uint32_t victim_row, uint16_t col, int distance) {
+
+    // here is the correct version of the addresses
+    const Addr ctrl_off  = getCtrlAddr(mem_pkt->addr);
+
+    // One DRAM row/page in bytes for this interface.
+    const Addr row_bytes = banksPerRank * burstsPerRowBuffer * burstSize;
+
+    // Move to row+1 while keeping column offset as-is (same column).
+    const Addr next_ctrl = ctrl_off + (distance * row_bytes);
+
+    // To make sure that we're causing bitflips at the right places, add an
+    // assert that the row is calculated correctly. it needs to be correctly
+    // implemented
+
+    
+    // Back to system physical address.
+    Addr addr = range.start() + next_ctrl;
+
+    // store the victim row as a separate variable for assertions
+    const uint32_t new_row =
+        (addr / burstSize / burstsPerRowBuffer / banksPerRank) % rowsPerBank;
+
+    // The recreated address' row must be within the same distance as the
+    // aggressor +- distance. This is a sanity check for modeling the right
+    // bit flip for data corruption.
+    fatal_if(new_row != (mem_pkt->row + distance), "The victim row %d from"
+                                            " the recomputed address is" 
+                                            " not the same as expected"
+                                            " row %d\n", new_row, victim_row);
+
+    // // this is not aligned. Addresses are byte addressable. This needs to be
+    // // validated.
+    // uint64_t row_mask = rowBufferSize;
+    size_t row_size = rowBufferSize;
+
+    // // make sure that you understand this correctly.
+    // // row = addr % rowsPerBank; The victim row depends up on the distance.
+    // uint32_t victim_row = (mem_pkt->addr % rowsPerBank) + distance; 
+
+
+    // assert(row_mask == row_size);
+
+    // Addr addr = mem_pkt->addr + ((distance * row_size) & ~row_mask);
+    uint8_t *host_addr = toHostAddr(addr);
+
+    assert(host_addr);
+    // So, each bank has it's own row. We will corrupt a bit in the same bank
+    // but at a different row. The row needs to be 
+    // size_t row_size = banksPerRank * rowBufferSize; // 8 * 1024;
+
+    // There has to be 65536 capacitors per row.
+    // This gives 8192 columns per row.
+    // The row buffer size is 1 KiB for 8x8
+    // This means that there are 8192 columns 
+
+    // read row_size from host addr
+    uint8_t *dest = new uint8_t[row_size];
+    std::memcpy(dest, host_addr, row_size);
+    
+    // if the user wants to enable ECC, we need to keep a track of the original
+    // data to that the ECC bits can be calculated
+    if (enableEcc) {
+        // check if this address (row aligned) exists in the tracker.
+        if (auto search = ecc_victims.find(addr);
+                search != ecc_victims.end()) {}
+        else {
+            // there is a first time corruption here. so keep this row tracked
+            // until this row is read. keep the entire row data
+            ecc_victims[addr] = dest;
+            ecc_columns[addr] = col;
+            DPRINTF(ECC, "Entry for %#x created with the original, col %d!\n",
+                addr, col);
+        }
+    }
+
+    // the bit to corrupt needs to be selected randomly! Let's just use an
+    // existing distribution to generate this bit. There are 8 capacitors
+    // per column in 8x8 dimm
+    uint64_t corrupt_bit = hd_distribution(generator) % 8;
+    dest[col] ^= (1 << corrupt_bit);
+    
+    // increment the stat to make sure that the right bit has flipped
+    stats.rowHammerCorruptedBitCount++;
+
+    // write the modified row again
+    std::memcpy(host_addr, dest, row_size);
+    DPRINTF(RhCorruption, "Aggressor row %d and Victim row %d\n", mem_pkt->row,
+                           new_row);
+    DPRINTF(RhCorruption, "Corrupted data somewhere at %#x and"
+                                " exact position %llu\n", addr, corrupt_bit);
+    delete[] dest;
 }
 
 void
@@ -666,7 +855,7 @@ DRAMInterface::activateBank(Rank& rank_ref, Bank& bank_ref,
                 companionTableLength, std::vector<uint64_t>(4));
 
             // initializing flag_map
-            b.flagged_entries.resize(8192, std::vector<bool>(1024));
+            b.flagged_entries.resize(rowsPerBank, std::vector<bool>(1024));
         }
         para_refreshes = 0;
 
@@ -719,12 +908,18 @@ DRAMInterface::activateBank(Rank& rank_ref, Bank& bank_ref,
                     // since this row is accessed, we increment its counter by
                     // 1. this information is used in the refresh section.
                     bank_ref.trr_table[i][3]++;
+
+                    // A new was started to being tracked in the actual TRR
+                    // table
+                    stats.rowHammerSamplerTriggers++;
                     break;
                 }
             }
 
             // If the row is not found in the trr table.
             if (!found_flag) {
+                // A new was started to being tracked
+                stats.rowHammerSamplerTriggers++;
                 // We have a row which is not in the TRR table. But we don't
                 // know if we want to put this row in the table or not.
                 // UTRR does not discuss this.
@@ -953,6 +1148,9 @@ DRAMInterface::activateBank(Rank& rank_ref, Bank& bank_ref,
                 row, selected, recreated_address);
 
             if (selected) {
+
+                // A new was started to being tracked
+                stats.rowHammerSamplerTriggers++;
                 // This row is selected to be sampled. Therefore we proceed to
                 // add this row in the counter table.
 
@@ -1045,6 +1243,9 @@ DRAMInterface::activateBank(Rank& rank_ref, Bank& bank_ref,
             }
 
             if (selected) {
+
+                // A new was started to being tracked
+                stats.rowHammerSamplerTriggers++;
                 // similar procedure as Vendor B. We traverse the table to find
                 // this entry in the table. This counter is necessary to issue
                 // refreshes in the inhibitor phase.
@@ -1124,6 +1325,10 @@ DRAMInterface::activateBank(Rank& rank_ref, Bank& bank_ref,
                     // since this row is accessed, we increment its counter by
                     // 1. this information is used in the refresh section.
                     bank_ref.trr_table[i][3]++;
+                    // this entry was already found in the table. increment
+                    // the trigger
+
+                    stats.rowHammerSamplerTriggers++;
                     break;
                 }
             }
@@ -1132,6 +1337,8 @@ DRAMInterface::activateBank(Rank& rank_ref, Bank& bank_ref,
             // new entry for this row in the trr table.
 
             if (!found_flag) {
+                // A new was started to being tracked
+                stats.rowHammerSamplerTriggers++;
                 // check if there is space in the trr table
                 if (bank_ref.entries < counterTableLength) {
                     // there is space in the table. we just create a new entry
@@ -1142,6 +1349,7 @@ DRAMInterface::activateBank(Rank& rank_ref, Bank& bank_ref,
                     bank_ref.trr_table[bank_ref.entries][2] = row;
                     bank_ref.trr_table[bank_ref.entries][3] = 1;
                     bank_ref.entries++;
+
                 }
                 else {
                     // there is no space in the trr table. replace the row with
@@ -1160,6 +1368,96 @@ DRAMInterface::activateBank(Rank& rank_ref, Bank& bank_ref,
                     bank_ref.trr_table[min_idx][1] = bank_ref.bank;
                     bank_ref.trr_table[min_idx][2] = row;
                     bank_ref.trr_table[min_idx][3] = 1;
+                }
+            }
+            // we are done in the sampler phase of the program. We just need to
+            // take care of the inhibitor phase of the program.
+            DPRINTF(RowHammer, "Rank %d, Bank %d, Row %d, Entries %d\n",
+                    rank_ref.rank, bank_ref.bank, row, bank_ref.entries);
+            break;
+        }
+        case 6: {
+            // This is a reimplementation of Vendor B's TRR with a simpler
+            // logic. 
+            // In out hardware experiments, we saw a particular row was always
+            // a victim row when sandwiched between 7291 and 7293 across 10
+            // different DIMMs.
+
+            // From literature (U-TRR), we only know that there is a RNG
+            // tracking some rows. FP-RowHammer suggests that if there is a
+            // pattern uncovered by Blacksmith on Vendor B, the aggressor rows
+            // are always not selected by TRR, allowing replay attacks to be
+            // successful.
+
+            // For the paper, we explicitly mask 7291 and 7293 so that these 
+            // rows are selected across multiple different DIMMs with different
+            // device maps and then compare the JS Divergence of the hardware
+            // and simulated maps.
+
+
+            const uint64_t mask = ~0xFULL;
+            const uint64_t undetected_rows = (7291 & mask);
+
+            bool selected = ((row & mask) == undetected_rows) ? false : true;
+
+
+            DPRINTF(RhInhibitor, "Simplified selection function "
+                " row %d, selected %d\n",
+                row, selected);
+
+            if (selected) {
+                stats.rowHammerSamplerTriggers++;
+                // This row is selected to be sampled. Therefore we proceed to
+                // add this row in the counter table.
+
+                // find space in the trr_table. companion_table is not needed
+                // in this case.
+                // There is space in the companion table for a new row.
+                uint8_t trr_idx = 0;
+
+                // before doing this, we need to check whether we have an entry
+                // for this row or not.
+
+                // forcing entry to the companion table when it is full.
+
+                bool found_flag = false;
+                for (int i = 0; i < std::max(
+                        counterTableLength, bank_ref.entries); i++) {
+                    // found this addr
+                    if (bank_ref.trr_table[i][0] == rank_ref.rank &&
+                        bank_ref.trr_table[i][1] == bank_ref.bank &&
+                        bank_ref.trr_table[i][2] == row) {
+                            // TODO: Need to check whether this row is open.
+                            // I guess activateBank does not require this.
+                            found_flag = true;
+                            bank_ref.trr_table[i][3]++;
+                            break;
+                        }
+                }
+
+                if (!found_flag) {
+                    // only if the table entry for that particular row is
+                    // missing we create a new entry in this table.
+
+                    // otherwise, we are done in this step. We don't need to
+                    // cover this part of the program.
+
+                    if (bank_ref.entries < counterTableLength) {
+                        trr_idx = bank_ref.entries;
+                        if (bank_ref.entries < counterTableLength - 1)
+                            bank_ref.entries += 1;
+                    }
+                    else {
+                        for (int i = 0; i < counterTableLength ; i++) {
+                            if (bank_ref.trr_table[trr_idx][3] >
+                                    bank_ref.trr_table[i][3])
+                                trr_idx = i;
+                        }
+                    }
+                    bank_ref.trr_table[trr_idx][0] = rank_ref.rank;
+                    bank_ref.trr_table[trr_idx][1] = bank_ref.bank;
+                    bank_ref.trr_table[trr_idx][2] = row;
+                    bank_ref.trr_table[trr_idx][3] = 1;
                 }
             }
             // we are done in the sampler phase of the program. We just need to
@@ -1187,8 +1485,12 @@ DRAMInterface::activateBank(Rank& rank_ref, Bank& bank_ref,
             // violates timing parameters.
 
             bool inhibitor_status = false;
-            if (prob <= 100)
+            if (prob <= 100) {
                 inhibitor_status = true;
+                // PARA is too simple where this means that the sampler is
+                // triggered
+                stats.rowHammerSamplerTriggers++;
+            }
 
             int num_neighbor_rows = 1;
 
@@ -1198,7 +1500,8 @@ DRAMInterface::activateBank(Rank& rank_ref, Bank& bank_ref,
             if (inhibitor_status) {
 
                 for (int i = 0 ; i < num_neighbor_rows; i++) {
-                            DPRINTF(RhInhibitor, "Inhibitor triggered "
+                    stats.rowHammerInhibitorTriggers++;
+                    DPRINTF(RhInhibitor, "Inhibitor triggered "
                             "refresh in rank %d, bank %d, row %d, "
                             "counter value %d, %d, %d, %d, \t"
                             "Issued PARA refreshes %lld\n",
@@ -1244,6 +1547,7 @@ DRAMInterface::activateBank(Rank& rank_ref, Bank& bank_ref,
                     }
 
                     para_refreshes += local_count;
+                    stats.rowHammerInhibitorTriggers++;
                     DPRINTF(RhInhibitor, "Inhibitor triggered "
                             "refresh in rank %d, bank %d, row %d, "
                             "counter value %d, %d, %d, %d, \t"
@@ -1449,25 +1753,26 @@ DRAMInterface::doBurstAccess(MemPacket* mem_pkt, Tick next_burst_at,
     // get the bank
     Bank& bank_ref = rank_ref.banks[mem_pkt->bank];
 
+    // TODO: Why do you need to do this? why 1024?
     // hammersim
-    if (!mem_pkt->isRead()) {
+    if (!mem_pkt->isRead() && first_act) {
         // this is a write operation.
         for (int i = 0 ; i < 1024; i++) {
             bank_ref.flagged_entries[mem_pkt->row][i] = false;
         }
     }
 
-    if (mem_pkt->row != 0) {
-        // now that rhtirggers is a vector, there is no self rh triggers
-        DPRINTF(DRAM, "thTrigger [row] %ld [row - 1] %ld  [row - 2]\n",
-                bank_ref.rhTriggers[mem_pkt->row - 1][2],
-                bank_ref.rhTriggers[mem_pkt->row][1],
-                bank_ref.rhTriggers[mem_pkt->row][0]);
-    }
-    else {
-        DPRINTF(DRAM, "Rhammer triggers  %ld \n",
-                bank_ref.rhTriggers[mem_pkt->row + 1][0]);
-    }
+    // if (mem_pkt->row != 0) {
+    //     // now that rhtirggers is a vector, there is no self rh triggers
+    //     DPRINTF(DRAM, "thTrigger [row] %ld [row - 1] %ld  [row - 2]\n",
+    //             bank_ref.rhTriggers[mem_pkt->row - 1][2],
+    //             bank_ref.rhTriggers[mem_pkt->row][1],
+    //             bank_ref.rhTriggers[mem_pkt->row][0]);
+    // }
+    // else {
+    //     DPRINTF(DRAM, "Rhammer triggers  %ld \n",
+    //             bank_ref.rhTriggers[mem_pkt->row + 1][0]);
+    // }
     // for the state we need to track if it is a row hit or not
     bool row_hit = true;
 
@@ -1488,7 +1793,122 @@ DRAMInterface::doBurstAccess(MemPacket* mem_pkt, Tick next_burst_at,
 
         // Record the activation and deal with all the global timing
         // constraints caused be a new activation (tRRD and tXAW)
+        DPRINTF(DRAMAddr, "ACT: Addr %#x, rank %d bank %d row %d\n",
+                    mem_pkt->addr, rank_ref.rank, bank_ref.bank, mem_pkt->row);
         activateBank(rank_ref, bank_ref, act_tick, mem_pkt->row);
+
+        // Okay, even though ECC is functionally implemented, ECC only corrects
+        // when the DRAM does a READ.
+        if (enableEcc) {
+            if (mem_pkt->isRead()) {
+                // check if this is a victim row and any of its bits are
+                // corrupted.
+                // Align the address with the start of the row to lookup the
+                // map
+                // TODO
+
+                // here is the correct version of the addresses
+                const Addr ctrl_off  = getCtrlAddr(mem_pkt->addr);
+
+                // One DRAM row/page in bytes for this interface.
+                const Addr row_bytes = 
+                                banksPerRank * burstsPerRowBuffer * burstSize;
+
+                // Move to row+1 while keeping column offset as-is (same
+                // column).
+                const Addr next_ctrl = ctrl_off + row_bytes;
+
+                // To make sure that we're causing bitflips at the right
+                // places, add an assert that the row is calculated correctly.
+                // it needs to be correctly implemented
+                Addr addr = range.start() + next_ctrl;
+                
+                // Back to system physical address.
+                // Addr addr = range.start() + next_ctrl;
+                if (auto search = ecc_victims.find(addr);
+                                   search != ecc_victims.end()) {
+                    DPRINTF(ECC, "Entry for %#x found with column %d\n",
+                                    addr, search->second);
+                    switch (eccAlgorithm) {
+                        case 0: break;
+                        case 1: {
+                                // SECDED
+                                // For every 64 bits, there are 8 bits of ECC
+                                // calculate the ECC bits from the original
+                                // data
+                                // step 1: calculate the ECC bits from the
+                                // original data
+                                // make sure that the modified data 64 bits
+                                // aligned
+                                uint16_t start_col = ecc_columns[addr] / 8;
+                                // get a 8 byte aligned word
+                                uint8_t *original_row_data = ecc_victims[addr];
+                                
+                                // 8-byte chunk start
+                                const uint8_t* d =
+                                                original_row_data + start_col;
+                                uint8_t ecc = 0;
+
+                                
+                                // For each ECC bit (column j in P)
+                                    for (std::size_t j = 0; j < 8; ++j) {
+                                        uint8_t parity = 0;
+
+                                        // XOR over all 64 data bits with
+                                        // P[i,j]
+                                        for (std::size_t i = 0; i < 64; ++i) {
+                                            // Extract data bit i
+                                            // (MSB-first within each byte)
+                                            const std::size_t byteIdx = i / 8;
+                                            const int bitPos =
+                                                7 - static_cast<int>(i % 8);
+                                            const uint8_t di =
+                                                static_cast<uint8_t>(
+                                                    (*(d + byteIdx) >> bitPos)
+                                                    & 0x1 );
+
+                                            // Take LSB of P entry as the
+                                            // matrix bit
+                                            const uint8_t pij =
+                                                static_cast<uint8_t>(
+                                                *(pMatrix + i * 8 + j) & 0x1);
+
+                                            parity ^= (di & pij);
+                                            // GF(2): XOR of ANDs
+                                        }
+
+                                        // Pack ECC bits MSB-first into the
+                                        // result byte
+                                        if (parity & 0x1) {
+                                            ecc |= static_cast<uint8_t>(
+                                                1u << (7 - j));
+                                        }
+                                    }
+                                    // the ecc bits are stored as ecc
+                                    DPRINTF(ECC, "ECC bits %d\n", ecc);
+
+
+
+                                // now get the exact data from the start_col
+
+                                // step 2: get the corrupted data data
+                                uint8_t *host_addr = toHostAddr(addr);
+                                assert(host_addr);
+                                
+                                uint8_t *dest = new uint8_t[row_size];
+                                std::memcpy(dest, host_addr, row_size);
+
+                                assert(false &&
+                                    "This feature is not fully"
+                                    " implemented yet\n");
+
+                                break;
+                            }
+                        default: fatal("unknown ECC algorithm!\n");
+                    }
+                }
+            }
+        }
     }
 
     // respect any constraints on the command (e.g. tRCD or tCCD)
@@ -1799,11 +2219,17 @@ DRAMInterface::DRAMInterface(const DRAMInterfaceParams &_p)
       trrThreshold(_p.trr_threshold),
       companionTableLength(_p.companion_table_length),
       companionThreshold(_p.companion_threshold),
+      rhStatDump(_p.rh_stat_dump),
+      rhStatFile(_p.rh_stat_file),
       singleSidedProb(_p.single_sided_prob),
       halfDoubleProb(_p.half_double_prob),
       doubleSidedProb(_p.double_sided_prob),
-      rhStatDump(_p.rh_stat_dump),
-      rhStatFile(_p.rh_stat_file),
+      enableMemoryCorruption(_p.enable_memory_corruption),
+      syntheticTraffic(_p.synthetic_traffic),
+      enableEcc(_p.enable_ecc),
+      pMatrixFileName(_p.p_matrix),
+      eccAlgorithm(_p.ecc_algorithm),
+      generator(seedEngine_()),
       pageMgmt(_p.page_policy),
       maxAccessesPerRow(_p.max_accesses_per_row),
       timeStampOffset(0), activeRank(0),
@@ -1874,9 +2300,54 @@ DRAMInterface::DRAMInterface(const DRAMInterfaceParams &_p)
     DPRINTF(RowHammer, "Initializing device map.\n");
 
     std::ifstream f(deviceFile);
+
+    // if (!f) {
+    //     fatal("The given device map does not exists!\n");
+    // }
     device_map = nlohmann::json::parse(f);
 
     DPRINTF(RowHammer, "Initialized device map successfully!\n");
+
+    // if the user wants to simulate ecc, then load the pMatrix file
+    if (enableEcc) {
+        std::ifstream pm(pMatrixFileName, std::ios::binary);
+        if (!pm) {
+            fatal("The given pMatrix file not found!\n");
+        }
+
+        pMatrix = new uint8_t[8];
+        std::size_t n = 0;
+
+        // Read byte-by-byte, accept only 'A' and store it
+        char ch;
+        while (pm.get(ch)) {
+            if (ch == 'A') {
+                *(pMatrix + n) = static_cast<uint8_t>(ch);
+                ++n;
+                if (n == 8) break;
+            }
+        }
+        pm.close();
+        
+        if (n != 8) {
+            fatal("Error: pMatrix file had only A entries; need 8\n");
+        }
+
+
+    }
+
+    // Initializing random nnumber distributions
+
+    // 2. Define a distribution
+    hd_distribution = std::uniform_int_distribution<uint64_t>(
+                std::numeric_limits<std::uint64_t>::min(), halfDoubleProb);
+    single_sided_distribution = std::uniform_int_distribution<uint64_t>(
+                std::numeric_limits<std::uint64_t>::min(), singleSidedProb);
+    double_sided_distribution = std::uniform_int_distribution<uint64_t>(
+                std::numeric_limits<std::uint64_t>::min(), doubleSidedProb);
+    another_distribution = std::uniform_int_distribution<uint64_t>(
+                                    std::numeric_limits<std::uint64_t>::min(),
+                                    std::numeric_limits<std::uint64_t>::max());
 
 
     // some basic sanity checks
@@ -1936,6 +2407,8 @@ DRAMInterface::init()
             }
         } else if (addrMapping == enums::RoRaBaCoCh ||
                    addrMapping == enums::RoCoRaBaCh) {
+            // TODO: Fix this at a later version for HammerSim
+            assert(false && "These addrMappings are unsupported by HammerSim");
             // for the interleavings with channel bits in the bottom,
             // if the system uses a channel striping granularity that
             // is larger than the DRAM burst size, then map the
@@ -2637,6 +3110,8 @@ DRAMInterface::Rank::processRefreshEvent()
         // refresh scheme as well. But, I think it is ok
         // to reset things after 8192 refreshes as well.
 
+
+        // DPRINTF(RhInhibitor, "Refresh Event Inhibitor triggered");
         // increment the refresh counter
         dram.refreshCounter++;
 
@@ -2721,6 +3196,7 @@ DRAMInterface::Rank::processRefreshEvent()
                                                 2 * num_neighbor_rows
                                             )
                             );
+                            stats.rowHammerInhibitorTriggers++;
                             // found an entry with more than threshold number
                             // of activates. it is important to note that
                             // entries in the trr table isn't cleared.
@@ -2760,6 +3236,7 @@ DRAMInterface::Rank::processRefreshEvent()
                 // break;
 
             case 2:
+            case 6:
                 // This is Vendor B from the U-TRR paper.
                 num_neighbor_rows = 2;
 
@@ -2854,6 +3331,7 @@ DRAMInterface::Rank::processRefreshEvent()
                                             2 * num_neighbor_rows
                                         )
                                 );
+                                stats.rowHammerInhibitorTriggers++;
                                 // found an entry with more than threshold
                                 // number of activates. it is important to note
                                 // that entries in the trr table isn't cleared.
@@ -2948,6 +3426,7 @@ DRAMInterface::Rank::processRefreshEvent()
 
             // reset the threshold counters. this depends on the trr variant
             // that we use.
+            DPRINTF(RhInhibitor, "Inhibitor refresh triggered\n");
 
             switch(dram.trrVariant) {
                 case 0:
@@ -2989,7 +3468,7 @@ DRAMInterface::Rank::processRefreshEvent()
                 case 4:
                     // there must be no cross variable initialziations.
                     if (dram.refreshCounter % 4096 == 0) {
-                        std :: cout << "Refershed" << std :: endl;
+                        DPRINTF(RhInhibitor, "All rows refreshed!\n");
 
                         for (auto &b : banks) {
                             for (int i = 0 ; i < dram.counterTableLength;
@@ -3012,9 +3491,10 @@ DRAMInterface::Rank::processRefreshEvent()
                     break;
                 case 2:
                 case 5:
+                case 6:
                     // there must be no cross variable initialziations.
                     if (dram.refreshCounter % 8192 == 0) {
-                        std :: cout << "Refershed" << std :: endl;
+                        DPRINTF(RhInhibitor, "All rows refreshed!\n");
 
                         for (auto &b : banks) {
                             for (int i = 0 ; i < dram.counterTableLength; i++)

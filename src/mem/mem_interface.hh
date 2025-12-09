@@ -158,7 +158,7 @@ class MemInterface : public AbstractMemory
             companion_table.resize(0, std::vector<uint64_t>(4));
 
             // initializing flag_map
-            flagged_entries.resize(8192, std::vector<bool>(1024));
+            flagged_entries.resize(32768, std::vector<bool>(1024));
         }
     };
 

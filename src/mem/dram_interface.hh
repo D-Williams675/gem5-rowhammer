@@ -46,6 +46,10 @@
 #ifndef __DRAM_INTERFACE_HH__
 #define __DRAM_INTERFACE_HH__
 
+#include <random>
+#include <cstddef>
+#include <cstdint>
+
 #include "mem/drampower.hh"
 #include "mem/mem_interface.hh"
 #include "params/DRAMInterface.hh"
@@ -55,6 +59,9 @@ namespace gem5
 
 namespace memory
 {
+
+  // A container to enable memory corruption
+
 
 /**
  * Interface to DRAM devices with media specific parameters,
@@ -537,6 +544,9 @@ class DRAMInterface : public MemInterface
     std::string deviceFile;
     nlohmann::json device_map;
 
+    // For the random number distributions
+
+
     //AYAZ: Rowhammer refresh counter
     int refreshCounter = 0;
 
@@ -547,15 +557,49 @@ class DRAMInterface : public MemInterface
     const uint32_t companionTableLength;
     const uint32_t companionThreshold;
 
+    const bool rhStatDump;
+    std::string rhStatFile;
+
     const uint64_t singleSidedProb;
     const uint64_t halfDoubleProb;
     const uint64_t doubleSidedProb;
 
+    const bool enableMemoryCorruption;
+
+    const bool syntheticTraffic;
+
+    // to implement ECC, there are a couple of parameters that the user needs
+    // to specify
+    const bool enableEcc;
+    const std::string pMatrixFileName;
+    const int eccAlgorithm;
+
+    uint8_t* pMatrix;
+
+    // Extra data structures needed to enable ECC. The addresses are row
+    // aligned. however, we'll keep a track of the columns and the data depen
+    std::unordered_map<gem5::Addr, uint8_t*> ecc_victims;
+    std::unordered_map<gem5::Addr, uint16_t> ecc_columns;
+
+    // We cannot use simple timing based seed and need a high quality random
+    // distribution to simulate the uniform probabilities
+    std::uniform_int_distribution<uint64_t> hd_distribution;
+    std::uniform_int_distribution<uint64_t> single_sided_distribution;
+    std::uniform_int_distribution<uint64_t> double_sided_distribution;
+    std::uniform_int_distribution<uint64_t> another_distribution;
+
+
+    // // std::random_device rd;
+    std::mt19937_64 generator;
+    static std::mt19937_64 seedEngine_() {
+        std::random_device rd;
+        return std::mt19937_64{ static_cast<std::mt19937_64::result_type>(rd()) };
+    }
+
+
     uint64_t num_trr_refreshes = 0;
     bool first_act = false;
     uint64_t para_refreshes;
-    const bool rhStatDump;
-    std::string rhStatFile;
 
     enums::PageManage pageMgmt;
     /**
@@ -606,6 +650,12 @@ class DRAMInterface : public MemInterface
      * @param col index of the column in the row
      */
     void checkRowHammer(Bank& bank_ref, MemPacket* mem_pkt);
+
+    /**
+     * Corrupt victim rows using this method
+     */
+    void doMemoryCorruption(MemPacket* mem_pkt, uint8_t bank, uint32_t row,
+                                    uint16_t col, int distance);
 
 
     /**
@@ -669,6 +719,26 @@ class DRAMInterface : public MemInterface
         statistics::Formula busUtilRead;
         statistics::Formula busUtilWrite;
         statistics::Formula pageHitRate;
+
+        // For rowhammer, we use the following statistics
+        statistics::Scalar rowHammerTotalBitflips;
+        statistics::Scalar rowHammerSingleSidedBitflips;
+        statistics::Scalar rowHammerDoubleSidedBitflips;
+        statistics::Scalar rowHammerHalfDoubleBitflips;
+
+        // For data corruption count we use
+        statistics::Scalar rowHammerCorruptedBitCount;
+        // For ECC, we use the number of errors corrected
+        statistics::Scalar rowHammerEccCorrected;
+        // And another stat for counting the number of detected errors;
+        statistics::Scalar rowHammerEccDetected;
+
+        // For other RowHammer mitigations, we use a couple of additional stats
+        // the number of times a row is selected to be put into the trr tables
+        // is counted as a samplertrigger
+        statistics::Scalar rowHammerSamplerTriggers;
+        statistics::Scalar rowHammerInhibitorTriggers;
+        
     };
 
     DRAMStats stats;

@@ -121,7 +121,7 @@ class DRAMInterface(MemInterface):
     )
 
     # Single-sided rowhammer probability.
-    single_sided_prob = Param.Unsigned(
+    single_sided_prob = Param.UInt64(
         1e7,
         "Number of double-sided RH "
         "bitflips required before observing "
@@ -129,20 +129,51 @@ class DRAMInterface(MemInterface):
     )
 
     # Half-Double rowhammer probability factor.
-    half_double_prob = Param.Unsigned(
+    half_double_prob = Param.UInt64(
         1e9,
         "Number of half-double RH "
         "attacks required before observing "
         "at least 1 single-sided bitflip.",
     )
 
-    double_sided_prob = Param.Unsigned(
+    double_sided_prob = Param.UInt64(
         1e5,
         "Number of double-sided RH "
         "attacks required to flip at least "
         "one bit in the sandwiched row.",
     )
 
+    enable_memory_corruption = Param.Bool(
+        False,
+        "Set this to True enable memory corruption"
+    )
+
+    # Traffic generators create too many bitflips once rhTriggers is reached
+    synthetic_traffic = Param.Bool(
+        False,
+        "Set this to true when using traffic generator"
+    )
+
+    # To enable ECC, the usr eneeds to specify a boolean
+    enable_ecc = Param.Bool(
+        False,
+        "Set this to true to enable functional ECC for data correction"
+    )
+
+    # pMatrix
+    p_matrix = Param.String(
+        "NULL",
+        "Specify a path to the pMatrix required to compute the ECC bits"
+    )
+
+    # ECC Algorithm. We want to have a string where the user specifies
+    # different algorithms, however, we want to maintain the ease to adding a
+    # new algorithm .
+    # 0     -> No ECC
+    # 1     -> SECDED
+    ecc_algorithm = Param.Int(
+        0, "Specify an ECC algorithm index to use in online hammersim"
+    )
     # scheduler page policy
     page_policy = Param.PageManage("open_adaptive", "Page management policy")
 
