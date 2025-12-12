@@ -224,6 +224,9 @@ class DRAMInterface : public MemInterface
          * Track time spent in each power state.
          */
         statistics::Vector pwrStateTime;
+
+        // TRR inhibitor is triggered here
+        statistics::Scalar rowHammerTrrInhibitorTriggers;
     };
 
     /**
@@ -576,10 +579,17 @@ class DRAMInterface : public MemInterface
 
     uint8_t* pMatrix;
 
+
+
+
     // Extra data structures needed to enable ECC. The addresses are row
     // aligned. however, we'll keep a track of the columns and the data depen
     std::unordered_map<gem5::Addr, uint8_t*> ecc_victims;
     std::unordered_map<gem5::Addr, uint16_t> ecc_columns;
+
+    // For multiple error bits in the same address, we use another map to keep
+    // track
+    std::unordered_map<gem5::Addr, unsigned int> multiple_errors;
 
     // We cannot use simple timing based seed and need a high quality random
     // distribution to simulate the uniform probabilities
@@ -600,6 +610,105 @@ class DRAMInterface : public MemInterface
     uint64_t num_trr_refreshes = 0;
     bool first_act = false;
     uint64_t para_refreshes;
+
+    // All SECDED code for ECC implementation is defined here:
+    // each ECC algorithm has a different pMatrix. for SECDED, we use this
+    // pMatrix
+    static inline uint8_t* makeSECDED_P64x8()
+    {
+        const std::size_t rows = 64;
+        const std::size_t cols = 8;
+    
+        uint8_t* P = new uint8_t[rows * cols];
+    
+        for (std::size_t i = 0; i < rows; ++i) {
+            const std::size_t one_based = i + 1;
+            for (std::size_t j = 0; j < cols; ++j) {
+                uint8_t val = (j < 7)
+                    ? static_cast<uint8_t>((one_based >> j) & 0x1)  // Hamming checks
+                    : static_cast<uint8_t>(1);                     // overall parity
+                *(P + i * cols + j) = val;
+            }
+        }
+        return P; // caller: delete[] P when done
+    }
+
+    // Extract data bit i (0..63) from the 8-byte chunk (MSB-first within each byte).
+    static inline uint8_t getDataBitMSBF(uint8_t* data, std::size_t i) {
+        const std::size_t byteIdx = i / 8;
+        const int bitPos = 7 - static_cast<int>(i % 8);
+        return static_cast<uint8_t>((*(data + byteIdx) >> bitPos) & 0x1);
+    }
+
+
+    // Compute ECC byte (8 bits, MSB-first) from data using flat P (64x8; only LSB of each entry is used).
+    static inline uint8_t computeECCByte_MSBF(const uint8_t* pMatrix, uint8_t* data) {
+        uint8_t ecc = 0;
+        for (std::size_t j = 0; j < 8; ++j) {
+            uint8_t parity = 0;
+            for (std::size_t i = 0; i < 64; ++i) {
+                const uint8_t di  = getDataBitMSBF(data, i);
+                const uint8_t pij = static_cast<uint8_t>(*(pMatrix + i * 8 + j) & 0x1);
+                parity ^= (di & pij);  // GF(2)
+            }
+            if (parity & 0x1) ecc |= static_cast<uint8_t>(1u << (7 - j));  // MSB-first
+        }
+        return ecc;
+    }
+    
+    
+    // Pack P[i,*] into an MSB-first byte (signature of data bit i in the syndrome space).
+    static inline uint8_t dataBitSignature_MSBF(const uint8_t* pMatrix, std::size_t i) {
+        uint8_t sig = 0;
+        for (std::size_t j = 0; j < 8; ++j)
+            if ((*(pMatrix + i * 8 + j) & 0x1) != 0)
+                sig |= static_cast<uint8_t>(1u << (7 - j));
+        return sig;
+    }
+    
+    // Correct at most one bit in-place.
+    // Inputs:
+    //   - new_data: pointer to 8 bytes (modified 64-bit chunk)
+    //   - ecc:      ECC byte computed from the original data (MSB-first packing)
+    //   - pMatrix:  pointer to 64*8 bytes (row-major), only LSB of each entry used
+    // Returns:
+    //   0 = no error, data unchanged
+    //   1 = corrected a data bit in-place
+    //   2 = only ECC bit was wrong (data was already correct)
+    //  -1 = uncorrectable (multi-bit or matrix doesn't allow localization)
+    static inline int correctOneBit_MSBF(uint8_t* new_data, uint8_t* ecc, const uint8_t* pMatrix) {
+        // Recompute ECC from current data and form syndrome
+        const uint8_t eccComputed = computeECCByte_MSBF(pMatrix, new_data);
+        const uint8_t syndrome    = static_cast<uint8_t>((*ecc) ^ eccComputed);
+    
+        if (syndrome == 0) return 0;  // Clean, nothing to do
+    
+        // ECC-bit error? syndrome is a unit bit (MSB-first)
+        for (std::size_t j = 0; j < 8; ++j) {
+            const uint8_t unit = static_cast<uint8_t>(1u << (7 - j));
+            if (syndrome == unit) {
+                // Flip that ECC bit; data is fine
+                *ecc ^= unit;
+                return 2;
+            }
+        }
+    
+        // Data-bit error? find i with signature equal to syndrome
+        for (std::size_t i = 0; i < 64; ++i) {
+            const uint8_t sig = dataBitSignature_MSBF(pMatrix, i);
+            if (sig == syndrome) {
+                // Flip data bit i (MSB-first)
+                const std::size_t byteIdx = i / 8;
+                const int bitPos = 7 - static_cast<int>(i % 8);
+                *(new_data + byteIdx) ^= static_cast<uint8_t>(1u << bitPos);
+                return 1;
+            }
+        }
+    
+        // Not a single-bit error (or unsuitable P)
+        return -1;
+    }
+
 
     enums::PageManage pageMgmt;
     /**
@@ -728,16 +837,23 @@ class DRAMInterface : public MemInterface
 
         // For data corruption count we use
         statistics::Scalar rowHammerCorruptedBitCount;
+        // For ECC, there is a case were the old and the new data are the same
+        statistics::Scalar rowHammerEccUnchanged;
         // For ECC, we use the number of errors corrected
         statistics::Scalar rowHammerEccCorrected;
+        // For >= 3 bit errors, SECDED will simply fail
+        statistics::Scalar rowHammerEccIncorrect;
         // And another stat for counting the number of detected errors;
         statistics::Scalar rowHammerEccDetected;
+        // Add another stat for errors in the ECC bits. This feature is not
+        // fully implemented tho.
+        statistics::Scalar rowHammerEccBitsCorrupted;
 
         // For other RowHammer mitigations, we use a couple of additional stats
         // the number of times a row is selected to be put into the trr tables
         // is counted as a samplertrigger
-        statistics::Scalar rowHammerSamplerTriggers;
         statistics::Scalar rowHammerInhibitorTriggers;
+        statistics::Scalar rowHammerSamplerTriggers;
         
     };
 

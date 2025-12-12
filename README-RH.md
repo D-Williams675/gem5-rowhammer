@@ -209,7 +209,22 @@ DRAMInterface::checkRowHammer(Bank& bank_ref, MemPacket* mem_pkt) {
 TWICE (E Lee et al.) is a good mitigation mechanism, easy to understand as a beginner to HammerSim.
 In this tutorial, we show how to add TWICE in HammerSim.
 
-TODO
+TWICE mathematically calculates the theoretical maximum number of aggressors possible during one tREFW.
+This is given by:
+$$ N = \frac{tREFW}{RowHammer Threshold \times tRC} $$
+
+For a simple DDR4 DIMM, $N = 25$
+This can be further pruned via:
+
+To implement tracking of these many aggressors per bank, we first define the trrTableLength in the python class for the DIMM.
+```py
+class TwiceDIMM():
+    trr_table_length = N
+    # We'll define a unique trr_variant number for this mitigation
+    trr_variant = 10
+```
+We'll use the above trr\_variant to write our C++ changes.
+For this, we'll directly use `trrTable` that tracks rows with activate count.
 
 ### Plating with error correcting codes (ECC)
 
