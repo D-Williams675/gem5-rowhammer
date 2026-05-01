@@ -731,20 +731,12 @@ DRAMInterface::doMemoryCorruption(MemPacket* mem_pkt, uint8_t bank,
     if (enableEcc) {
         // check if this address (row aligned) exists in the tracker.
         if (auto search = ecc_victims.find(addr);
-                search != ecc_victims.end()) {
-            // count this
-            multiple_errors[addr]++;
-            DPRINTF(ECC, "There are multiple corruptions in the same address!"
-                    " addr: %#x, number %d \n", addr, multiple_errors[addr]);
-            // This is important to keep track of for silent data corruptions
-            // when ECC is enabled
-        }
+                search != ecc_victims.end()) {}
         else {
             // there is a first time corruption here. so keep this row tracked
             // until this row is read. keep the entire row data
             ecc_victims[addr] = dest;
             ecc_columns[addr] = col;
-            multiple_errors[addr] = 1;
             DPRINTF(ECC, "Entry for %#x created with the original, col %d!\n",
                 addr, col);
         }
@@ -1808,7 +1800,6 @@ DRAMInterface::doBurstAccess(MemPacket* mem_pkt, Tick next_burst_at,
         // Okay, even though ECC is functionally implemented, ECC only corrects
         // when the DRAM does a READ.
         if (enableEcc) {
-            warn("ECC is not fully tested yet!\n");
             if (mem_pkt->isRead()) {
                 // check if this is a victim row and any of its bits are
                 // corrupted.
@@ -1837,7 +1828,7 @@ DRAMInterface::doBurstAccess(MemPacket* mem_pkt, Tick next_burst_at,
                 if (auto search = ecc_victims.find(addr);
                                    search != ecc_victims.end()) {
                     DPRINTF(ECC, "Entry for %#x found with column %d\n",
-                                    addr, ecc_columns[addr]);
+                                    addr, search->second);
                     switch (eccAlgorithm) {
                         case 0: break;
                         case 1: {
@@ -1849,7 +1840,6 @@ DRAMInterface::doBurstAccess(MemPacket* mem_pkt, Tick next_burst_at,
                                 // original data
                                 // make sure that the modified data 64 bits
                                 // aligned
-                                // TODO: Why divide by 8?
                                 uint16_t start_col = ecc_columns[addr] / 8;
                                 // get a 8 byte aligned word
                                 uint8_t *original_row_data = ecc_victims[addr];
@@ -1857,122 +1847,62 @@ DRAMInterface::doBurstAccess(MemPacket* mem_pkt, Tick next_burst_at,
                                 // 8-byte chunk start
                                 const uint8_t* d =
                                                 original_row_data + start_col;
-                                
                                 uint8_t ecc = 0;
 
                                 
                                 // For each ECC bit (column j in P)
-                                for (std::size_t j = 0; j < 8; ++j) {
-                                    uint8_t parity = 0;
+                                    for (std::size_t j = 0; j < 8; ++j) {
+                                        uint8_t parity = 0;
 
-                                    // XOR over all 64 data bits with
-                                    // P[i,j]
-                                    for (std::size_t i = 0; i < 64; ++i) {
-                                        // Extract data bit i
-                                        // (MSB-first within each byte)
-                                        const std::size_t byteIdx = i / 8;
-                                        const int bitPos =
-                                            7 - static_cast<int>(i % 8);
-                                        const uint8_t di =
-                                            static_cast<uint8_t>(
-                                                (*(d + byteIdx) >> bitPos)
-                                                & 0x1 );
+                                        // XOR over all 64 data bits with
+                                        // P[i,j]
+                                        for (std::size_t i = 0; i < 64; ++i) {
+                                            // Extract data bit i
+                                            // (MSB-first within each byte)
+                                            const std::size_t byteIdx = i / 8;
+                                            const int bitPos =
+                                                7 - static_cast<int>(i % 8);
+                                            const uint8_t di =
+                                                static_cast<uint8_t>(
+                                                    (*(d + byteIdx) >> bitPos)
+                                                    & 0x1 );
 
-                                        // Take LSB of P entry as the
-                                        // matrix bit
-                                        const uint8_t pij =
-                                            static_cast<uint8_t>(
-                                            *(pMatrix + i * 8 + j) & 0x1);
+                                            // Take LSB of P entry as the
+                                            // matrix bit
+                                            const uint8_t pij =
+                                                static_cast<uint8_t>(
+                                                *(pMatrix + i * 8 + j) & 0x1);
 
-                                        parity ^= (di & pij);
-                                        // GF(2): XOR of ANDs
+                                            parity ^= (di & pij);
+                                            // GF(2): XOR of ANDs
+                                        }
+
+                                        // Pack ECC bits MSB-first into the
+                                        // result byte
+                                        if (parity & 0x1) {
+                                            ecc |= static_cast<uint8_t>(
+                                                1u << (7 - j));
+                                        }
                                     }
+                                    // the ecc bits are stored as ecc
+                                    DPRINTF(ECC, "ECC bits %d\n", ecc);
 
-                                    // Pack ECC bits MSB-first into the
-                                    // result byte
-                                    if (parity & 0x1) {
-                                        ecc |= static_cast<uint8_t>(
-                                            1u << (7 - j));
-                                    }
-                                }
-                                // the ecc bits are stored as ecc
-                                DPRINTF(ECC, "ECC bits %d\n", ecc);
+
+
                                 // now get the exact data from the start_col
 
                                 // step 2: get the corrupted data data
                                 uint8_t *host_addr = toHostAddr(addr);
                                 assert(host_addr);
-                                
-                                size_t row_size = rowBufferSize;
+                               
+                                uint64_t row_size = rowBufferSize;
                                 uint8_t *dest = new uint8_t[row_size];
                                 std::memcpy(dest, host_addr, row_size);
 
-                                // dest is the modified and assumed to be
-                                // corrupted.
-                                switch (correctOneBit_MSBF(dest, &ecc,
-                                                                    pMatrix)) {
-                                    case 0: // no change in the original and
-                                            // the modified data.
-                                            stats.rowHammerEccUnchanged++;
-                                            break;
-                                    case 1: // there was a single bit rttot and
-                                            // the bit was corrected!
-                                            stats.rowHammerEccCorrected++;
-                                            DPRINTF(ECC, "SECDED corrected "
-                                                "single bit error at address "
-                                                "%#x\n", mem_pkt->addr);
-                                            // This can mean
-                                            // two things: the data was
-                                            // actually corrected, or, this is
-                                            // a silent error where there are
-                                            // more than 3 bits error.
-                                            // i've kept structures to note
-                                            // this for faster simulation time
-                                            if (multiple_errors[addr] > 2) {
-                                                stats.rowHammerEccIncorrect++;
-                                                DPRINTF(ECC, "There were %d "
-                                                    "bitflips in the 64 bit "
-                                                    "word. Hence this is a "
-                                                    "silent data corruption! "
-                                                    "pkt addr %#x, tracking "
-                                                    "addr %#x\n",
-                                                    multiple_errors[addr],
-                                                    mem_pkt->addr,
-                                                    addr);
-                                            }
-                                            break;
-                                     case 2: // the ecc bits are incorrectly
-                                             // computed.
-                                             stats.rowHammerEccBitsCorrupted++;
-                                             DPRINTF(ECC, "SECDED ECC bits "
-                                                "have error! bits: %d\n", ecc);
-                                             // since this should never happen
-                                             // for functional ECC, i'll drop a
-                                             // fata condition here. if this is
-                                             // happening, then it means that
-                                             // there are logical errors in the
-                                             // code.
-                                             fatal("ECC bits should never be "
-                                                 "corrupted when modeling "
-                                                 "functional ECC algorithms"
-                                                 "\n");
-                                             break;
-                                       case -1: // detected 2 bit error!
-                                              stats.rowHammerEccDetected++;
-                                              DPRINTF(ECC, "Uncorrectable bit "
-                                                  "flips at %#x",
-                                                  mem_pkt->addr);
-                                              break;
-                                        default: fatal("correctOneBit_MSBF(..)"
-                                                    " is incorrectly "
-                                                    "implemented!");
-                                }
-                                // the structures used to track the data
-                                // corruption now needs to be deleted from the
-                                // maps
-                                ecc_victims.erase(addr);
-                                ecc_columns.erase(addr);
-                                multiple_errors.erase(addr);
+                                assert(false &&
+                                    "This feature is not fully"
+                                    " implemented yet\n");
+
                                 break;
                             }
                         default: fatal("unknown ECC algorithm!\n");
@@ -2385,12 +2315,26 @@ DRAMInterface::DRAMInterface(const DRAMInterfaceParams &_p)
         if (!pm) {
             fatal("The given pMatrix file not found!\n");
         }
-        switch (eccAlgorithm) {
-            case 0: break;
-            case 1: pMatrix = makeSECDED_P64x8();
-                    break;
-            default: fatal("Unknown ECC  Algorithm\n");
+
+        pMatrix = new uint8_t[8];
+        std::size_t n = 0;
+
+        // Read byte-by-byte, accept only 'A' and store it
+        char ch;
+        while (pm.get(ch)) {
+            if (ch == 'A') {
+                *(pMatrix + n) = static_cast<uint8_t>(ch);
+                ++n;
+                if (n == 8) break;
+            }
         }
+        pm.close();
+        
+        if (n != 8) {
+            fatal("Error: pMatrix file had only A entries; need 8\n");
+        }
+
+
     }
 
     // Initializing random nnumber distributions
@@ -3253,7 +3197,7 @@ DRAMInterface::Rank::processRefreshEvent()
                                                 2 * num_neighbor_rows
                                             )
                             );
-                            stats.rowHammerTrrInhibitorTriggers++;
+                            dram.stats.rowHammerInhibitorTriggers++;
                             // found an entry with more than threshold number
                             // of activates. it is important to note that
                             // entries in the trr table isn't cleared.
@@ -3388,7 +3332,7 @@ DRAMInterface::Rank::processRefreshEvent()
                                             2 * num_neighbor_rows
                                         )
                                 );
-                                stats.rowHammerTrrInhibitorTriggers++;
+                                dram.stats.rowHammerInhibitorTriggers++;
                                 // found an entry with more than threshold
                                 // number of activates. it is important to note
                                 // that entries in the trr table isn't cleared.
@@ -4039,33 +3983,8 @@ DRAMInterface::DRAMStats::DRAMStats(DRAMInterface &_dram)
              "Data bus utilization in percentage for writes"),
 
     ADD_STAT(pageHitRate, statistics::units::Ratio::get(),
-             "Row buffer hit rate, read and write combined"),
-    ADD_STAT(rowHammerTotalBitflips, statistics::units::Count::get(),
-             "Total bitflip count due to rowhammer attacks"),
-    ADD_STAT(rowHammerSingleSidedBitflips, statistics::units::Count::get(),
-             "Total bitflip count due to single sided rowhammer attacks"),
-    ADD_STAT(rowHammerDoubleSidedBitflips, statistics::units::Count::get(),
-             "Total bitflip count due to double sided rowhammer attacks"),
-    ADD_STAT(rowHammerHalfDoubleBitflips, statistics::units::Count::get(),
-             "Total bitflip count due to half double rowhammer attacks"),
+             "Row buffer hit rate, read and write combined")
 
-    ADD_STAT(rowHammerCorruptedBitCount, statistics::units::Count::get(),
-             "Bitflip count due to rowhammer attacks with data corruption"),
-    ADD_STAT(rowHammerEccUnchanged, statistics::units::Count::get(),
-             "Times when data was already correct; EEC wasn't triggered"),
-    ADD_STAT(rowHammerEccCorrected, statistics::units::Count::get(),
-             "Times when ECC corrected data"),
-    ADD_STAT(rowHammerEccIncorrect, statistics::units::Count::get(),
-             "Times when ECC incorrectly corrected data!"),
-    ADD_STAT(rowHammerEccDetected, statistics::units::Count::get(),
-             "Times when ECC detected errors but couldn't correct them"),
-    ADD_STAT(rowHammerEccBitsCorrupted, statistics::units::Count::get(),
-             "times when ECC bits are incorrect"),
-
-    ADD_STAT(rowHammerInhibitorTriggers, statistics::units::Count::get(),
-             "Inhibitor triggers (non-TRR)"),
-    ADD_STAT(rowHammerSamplerTriggers, statistics::units::Count::get(),
-             "Sampler triggers")
 {
 }
 
@@ -4150,9 +4069,7 @@ DRAMInterface::RankStats::RankStats(DRAMInterface &_dram, Rank &_rank)
     ADD_STAT(totalIdleTime, statistics::units::Tick::get(),
              "Total Idle time Per DRAM Rank"),
     ADD_STAT(pwrStateTime, statistics::units::Tick::get(),
-             "Time in different power states"),
-    ADD_STAT(rowHammerTrrInhibitorTriggers, statistics::units::Count::get(),
-             "TRR specific inhibitor triggers")
+             "Time in different power states")
 {
 }
 
