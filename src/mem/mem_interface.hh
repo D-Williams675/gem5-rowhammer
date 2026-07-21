@@ -48,8 +48,10 @@
 
 #include <sys/time.h>
 
+#include <cstdint>
 #include <deque>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -146,6 +148,37 @@ class MemInterface : public AbstractMemory
         // currently it only supports one bank.
 
         std::vector<std::vector<bool>> flagged_entries;
+
+        // hammersim (parameterized weak-row/weak-cell probability model,
+        // see DRAMInterface::isRowWeak / getCellFlipProbability):
+        //
+        // rowWeakness[row]: -1 = not yet decided, 0 = not weak, 1 = weak.
+        // A row's weak/non-weak classification is decided the first time
+        // it is queried, then cached here for the remainder of the
+        // simulation, since real DRAM row weakness is a fixed physical
+        // property and must not change between accesses.
+        std::vector<int8_t> rowWeakness;
+
+        // Lazily-cached per-cell flip probability: row -> (column ->
+        // probability). Populated the first time a given (row, column)
+        // pair is actually queried, so we never need to pre-compute
+        // probabilities for the entire (potentially huge) address space
+        // up front.
+        std::unordered_map<uint32_t,
+                            std::unordered_map<uint16_t, double>>
+            cellFlipProb;
+
+        // Tracks already-flipped columns for the REAL hardware-data
+        // path only (see DRAMInterface::selectVictimColumn): row ->
+        // set of columns that have already flipped and not yet been
+        // rewritten. Real device_map column values are not bounded to
+        // flagged_entries' fixed 1024-column size (we have observed
+        // real columns well past 1024, e.g. 6802), so this uses an
+        // unbounded per-row set instead of indexing into
+        // flagged_entries directly for this path.
+        std::unordered_map<uint32_t, std::unordered_set<uint16_t>>
+            realDataFlipped;
+
         Bank() :
             openRow(NO_ROW), bank(0), bankgr(0),
             rdAllowedAt(0), wrAllowedAt(0), preAllowedAt(0), actAllowedAt(0),

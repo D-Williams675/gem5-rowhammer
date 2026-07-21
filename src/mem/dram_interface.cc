@@ -41,6 +41,7 @@
 
 #include "base/bitfield.hh"
 #include "base/cprintf.hh"
+#include "base/random.hh"
 #include "base/trace.hh"
 
 #include "debug/DRAM.hh"
@@ -226,35 +227,16 @@ DRAMInterface::checkRowHammer(Bank& bank_ref, MemPacket* mem_pkt)
             if (prob == 1)
                 bitflip = true;
 
-            // now search for the device_map whether this row is weak or not
+            // Parameterized weak-row/weak-cell probability model:
+            // pick a column uniformly within the victim row, then test
+            // it against that specific cell's own flip probability
+            // (see DRAMInterface::selectVictimColumn). This replaces
+            // the previous logic, which picked uniformly from a fixed
+            // list of pre-flagged "weak" columns -- giving every weak
+            // column an equal chance regardless of how weak it
+            // actually was.
             uint16_t col;
-            if (device_map["0"][std::to_string(bank_ref.bank)]
-                    [std::to_string(mem_pkt->row - 2)] != nullptr) {
-                srand((time.tv_sec * 1000) + (time.tv_usec / 1000));
-
-                uint16_t col_idx = rand() % (uint16_t)device_map["0"]
-                        [std::to_string(bank_ref.bank)]
-                        [std::to_string(mem_pkt->row - 2)].size();
-                col = (uint16_t)device_map["0"][std::to_string(bank_ref.bank)]
-                    [std::to_string(mem_pkt->row - 2)][col_idx];
-
-                // TODO:
-                // Now delete this entry from the device map as the same bit
-                // (column in this case) cannot flip twice unless somehting new
-                // is written in the same column.
-
-                // XXX:
-                // I am using a simple method by keeping track of this column
-                // and not allowing this column to flip until a write happens
-                // on this column.
-
-                if (bank_ref.flagged_entries[mem_pkt->row - 2][col] == 1) {
-                    bitflip = false;
-                }
-                bank_ref.flagged_entries[mem_pkt->row - 2][col] = 1;
-
-            }
-            else {
+            if (!selectVictimColumn(bank_ref, mem_pkt->row - 2, col)) {
                 bitflip = false;
             }
 
@@ -308,26 +290,12 @@ DRAMInterface::checkRowHammer(Bank& bank_ref, MemPacket* mem_pkt)
             if (prob == 1)
                 bitflip = true;
 
-            // TODO: We need to flip a bit in the MemPacket for row +- 2
+            // Parameterized weak-row/weak-cell probability model
+            // (see DRAMInterface::selectVictimColumn).
             uint16_t col;
-            if (device_map["0"][std::to_string(bank_ref.bank)]
-                    [std::to_string(mem_pkt->row + 2)] != nullptr) {
-
-                srand((time.tv_sec * 1000) + (time.tv_usec / 1000));
-                uint16_t col_idx = rand() % (uint16_t)device_map["0"]
-                        [std::to_string(bank_ref.bank)]
-                        [std::to_string(mem_pkt->row + 2)].size();
-                col = (uint16_t)device_map["0"][std::to_string(bank_ref.bank)]
-                    [std::to_string(mem_pkt->row + 2)][col_idx];
-                // mem_pkt->corruptedAccess = true;
-
-                if (bank_ref.flagged_entries[mem_pkt->row + 2][col] == 1)
-                    bitflip = false;
-
-                bank_ref.flagged_entries[mem_pkt->row + 2][col] = 1;
-            }
-            else
+            if (!selectVictimColumn(bank_ref, mem_pkt->row + 2, col)) {
                 bitflip = false;
+            }
 
             if (bitflip) {
                 stats.rowHammerTotalBitflips++;
@@ -433,25 +401,11 @@ DRAMInterface::checkRowHammer(Bank& bank_ref, MemPacket* mem_pkt)
 
         uint16_t col;
         if (mem_pkt->row > 0) {
-            if (device_map["0"][std::to_string(bank_ref.bank)]
-                    [std::to_string(mem_pkt->row - 1)] != nullptr) {
-
-                srand((time.tv_sec * 1000) + (time.tv_usec / 1000));
-                uint16_t col_idx = rand() % (uint16_t)device_map["0"]
-                    [std::to_string(bank_ref.bank)]
-                    [std::to_string(mem_pkt->row - 1)].size();
-                col = (uint16_t)device_map["0"][std::to_string(bank_ref.bank)]
-                    [std::to_string(mem_pkt->row - 1)][col_idx];
-                // mem_pkt->corruptedAccess = true;
-                if (bank_ref.flagged_entries[mem_pkt->row - 1][col] == 1)
-                    bitflip_status = false;
-
-                bank_ref.flagged_entries[mem_pkt->row - 1][col] = 1;
-            }
-            else
-                // it does not really matter what the bitflip status is. it has
-                // to be set to false at this point.
+            // Parameterized weak-row/weak-cell probability model
+            // (see DRAMInterface::selectVictimColumn).
+            if (!selectVictimColumn(bank_ref, mem_pkt->row - 1, col)) {
                 bitflip_status = false;
+            }
 
 
             if (bitflip_status) {
@@ -591,24 +545,11 @@ DRAMInterface::checkRowHammer(Bank& bank_ref, MemPacket* mem_pkt)
 
         uint16_t col;
         if (mem_pkt->row < rowsPerBank - 2) {
-            if (device_map["0"][std::to_string(bank_ref.bank)]
-                [std::to_string(mem_pkt->row + 1)] != nullptr) {
-
-                srand((time.tv_sec * 1000) + (time.tv_usec / 1000));
-
-                uint16_t col_idx = rand() % (uint16_t)device_map["0"]
-                    [std::to_string(bank_ref.bank)]
-                    [std::to_string(mem_pkt->row + 1)].size();
-                col = (uint16_t)device_map["0"][std::to_string(bank_ref.bank)]
-                    [std::to_string(mem_pkt->row + 1)][col_idx];
-                // mem_pkt->corruptedAccess = true;
-                if (bank_ref.flagged_entries[mem_pkt->row + 1][col] == 1)
-                    bitflip_status = false;
-
-                bank_ref.flagged_entries[mem_pkt->row + 1][col] = 1;
-            }
-            else
+            // Parameterized weak-row/weak-cell probability model
+            // (see DRAMInterface::selectVictimColumn).
+            if (!selectVictimColumn(bank_ref, mem_pkt->row + 1, col)) {
                 bitflip_status = false;
+            }
 
             if (bitflip_status) {
                 stats.rowHammerTotalBitflips++;
@@ -662,6 +603,205 @@ DRAMInterface::checkRowHammer(Bank& bank_ref, MemPacket* mem_pkt)
             }
         }
     }
+}
+
+bool
+DRAMInterface::isRowWeak(Bank& bank_ref, uint32_t row)
+{
+    assert(row < bank_ref.rowWeakness.size());
+
+    // -1 means "not yet decided". Decide once, then cache forever: a
+    // real DRAM row's weakness is a fixed physical property and must
+    // not change between accesses within the same simulation.
+    if (bank_ref.rowWeakness[row] == -1) {
+        std::uniform_real_distribution<double> unit_dist(0.0, 1.0);
+        double roll = unit_dist(generator);
+        bank_ref.rowWeakness[row] =
+            (roll < (weakRowPercent / 100.0)) ? 1 : 0;
+    }
+
+    return bank_ref.rowWeakness[row] == 1;
+}
+
+double
+DRAMInterface::sampleBucketedProbability(bool weak)
+{
+    std::uniform_real_distribution<double> unit_dist(0.0, 1.0);
+    double roll = unit_dist(generator);
+
+    if (weak) {
+        // Weights are stored as percentages (summing to 100); convert
+        // to fractions (summing to 1) for use as cumulative cutoffs.
+        const double w1 = weakBucketX1 / 100.0;
+        const double w2 = weakBucketX2 / 100.0;
+        const double w3 = weakBucketX3 / 100.0;
+        // w4 is implied as the remainder up to 1.0, so floating-point
+        // rounding at the very top of the range cannot leave `roll`
+        // unmatched by any bucket below.
+
+        if (roll < w1) {
+            std::uniform_real_distribution<double> d(0.0, weakBucketP1);
+            return d(generator);
+        } else if (roll < w1 + w2) {
+            std::uniform_real_distribution<double> d(weakBucketP1,
+                                                       weakBucketP2);
+            return d(generator);
+        } else if (roll < w1 + w2 + w3) {
+            std::uniform_real_distribution<double> d(weakBucketP2,
+                                                       weakBucketP3);
+            return d(generator);
+        } else {
+            std::uniform_real_distribution<double> d(weakBucketP3,
+                                                       weakBucketP4);
+            return d(generator);
+        }
+    } else {
+        const double z1 = nonweakBucketZ1 / 100.0;
+        // z2 is implied as the remainder, same reasoning as above.
+
+        if (roll < z1) {
+            std::uniform_real_distribution<double> d(0.0,
+                                                       nonweakBucketP5);
+            return d(generator);
+        } else {
+            std::uniform_real_distribution<double> d(nonweakBucketP5,
+                                                       nonweakBucketP6);
+            return d(generator);
+        }
+    }
+}
+
+double
+DRAMInterface::getCellFlipProbability(Bank& bank_ref, uint32_t row,
+                                        uint16_t col)
+{
+    // Check the cache first: has this exact (row, col) cell already
+    // been assigned a probability?
+    auto row_it = bank_ref.cellFlipProb.find(row);
+    if (row_it != bank_ref.cellFlipProb.end()) {
+        auto col_it = row_it->second.find(col);
+        if (col_it != row_it->second.end()) {
+            return col_it->second;
+        }
+    }
+
+    // Not cached yet: decide the row's weakness (cached separately in
+    // isRowWeak), then draw and cache this specific cell's
+    // probability so it never changes again for the rest of the
+    // simulation.
+    bool weak = isRowWeak(bank_ref, row);
+    double prob = sampleBucketedProbability(weak);
+    bank_ref.cellFlipProb[row][col] = prob;
+    return prob;
+}
+
+bool
+DRAMInterface::selectVictimColumn(Bank& bank_ref, uint32_t victim_row,
+                                    uint16_t& col)
+{
+    assert(victim_row < bank_ref.flagged_entries.size());
+
+    // --------------------------------------------------------------
+    // Prefer real, hardware-measured weak-column data when it exists
+    // for this row (loaded from device_file / device_map -- e.g. from
+    // a real Blacksmith characterization run on physical DRAM) AND
+    // preferDeviceMapData is true (see DRAMInterface.py). Real
+    // profiling data only ever covers a small, specifically-tested
+    // subset of rows (profiling every row of a real DIMM is
+    // impractically slow), so we fall back to the synthetic
+    // parameterized weak-row/weak-cell model (isRowWeak /
+    // getCellFlipProbability) for any row without real data, and also
+    // for every row if preferDeviceMapData has been explicitly set to
+    // false (useful for testing the synthetic model in isolation).
+    //
+    // NOTE: we use .contains()/.at() rather than operator[] for these
+    // lookups. nlohmann::json's operator[] silently creates an empty
+    // entry for any missing key when called on a mutable json object,
+    // which would otherwise corrupt device_map with a growing set of
+    // bogus empty entries every time we check a row with no real
+    // data (which, again, is most rows).
+    // --------------------------------------------------------------
+    bool has_real_data = false;
+    const std::string bank_key = std::to_string(bank_ref.bank);
+    const std::string row_key = std::to_string(victim_row);
+
+    if (preferDeviceMapData && device_map.contains("0")) {
+        const auto& rank_entry = device_map.at("0");
+        if (rank_entry.contains(bank_key)) {
+            const auto& queried_bank = rank_entry.at(bank_key);
+            if (queried_bank.contains(row_key) &&
+                queried_bank.at(row_key).is_array() &&
+                queried_bank.at(row_key).size() > 0) {
+                has_real_data = true;
+            }
+        }
+    }
+
+    if (has_real_data) {
+        // Real hardware data path: pick uniformly among the real
+        // known-weak columns for this row (this preserves HammerSim's
+        // original behavior for rows that have real measurements).
+        const auto& weak_cols =
+            device_map.at("0").at(bank_key).at(row_key);
+
+        std::uniform_int_distribution<size_t> idx_dist(
+            0, weak_cols.size() - 1);
+        col = static_cast<uint16_t>(weak_cols[idx_dist(generator)]);
+
+        // Real device_map column values are not bounded to
+        // flagged_entries' fixed 1024-column size (observed real
+        // columns well past 1024, e.g. 6802) -- use the unbounded
+        // per-row realDataFlipped set instead, to avoid indexing
+        // flagged_entries out of bounds.
+        auto& flipped_cols = bank_ref.realDataFlipped[victim_row];
+        if (flipped_cols.count(col)) {
+            return false;
+        }
+        flipped_cols.insert(col);
+        return true;
+    }
+
+    // --------------------------------------------------------------
+    // Synthetic parameterized model fallback (no real data for this
+    // row): pick a column uniformly across the whole row, then decide
+    // whether it flips based on that specific cell's own sampled
+    // flip probability.
+    //
+    // NOTE: flagged_entries is only ever sized for 1024 columns per
+    // row (see the one-time initialization in activateBank()),
+    // regardless of the DIMM's actual rowBufferSize. We must not
+    // index flagged_entries beyond that bound, or risk out-of-bounds
+    // access. This is a pre-existing limitation of flagged_entries
+    // (not introduced here); it is simply newly reachable now that we
+    // sample columns across the full row instead of only from a
+    // pre-filtered weak-column list, so we explicitly clamp here.
+    // --------------------------------------------------------------
+    const uint16_t max_col =
+        static_cast<uint16_t>(std::min<size_t>(rowBufferSize, 1024));
+    fatal_if(max_col == 0, "rowBufferSize must be greater than 0\n");
+
+    std::uniform_int_distribution<uint16_t> col_dist(0, max_col - 1);
+    col = col_dist(generator);
+
+    assert(col < bank_ref.flagged_entries[victim_row].size());
+
+    // A column that already flipped and hasn't been rewritten cannot
+    // flip again -- preserves the same bookkeeping the prior
+    // uniform-selection code used.
+    if (bank_ref.flagged_entries[victim_row][col]) {
+        return false;
+    }
+
+    double flip_prob = getCellFlipProbability(bank_ref, victim_row, col);
+
+    std::uniform_real_distribution<double> unit_dist(0.0, 1.0);
+    double roll = unit_dist(generator);
+
+    bool flips = (roll < flip_prob);
+    if (flips) {
+        bank_ref.flagged_entries[victim_row][col] = 1;
+    }
+    return flips;
 }
 
 void
@@ -856,6 +996,13 @@ DRAMInterface::activateBank(Rank& rank_ref, Bank& bank_ref,
 
             // initializing flag_map
             b.flagged_entries.resize(rowsPerBank, std::vector<bool>(1024));
+
+            // hammersim: initialize the weak-row classification cache,
+            // one entry per row, all starting "undecided" (-1). See
+            // DRAMInterface::isRowWeak(). cellFlipProb (the per-cell
+            // probability cache) needs no upfront sizing since it is
+            // an unordered_map populated lazily on first access.
+            b.rowWeakness.resize(rowsPerBank, -1);
         }
         para_refreshes = 0;
 
@@ -2227,10 +2374,23 @@ DRAMInterface::DRAMInterface(const DRAMInterfaceParams &_p)
       doubleSidedProb(_p.double_sided_prob),
       enableMemoryCorruption(_p.enable_memory_corruption),
       syntheticTraffic(_p.synthetic_traffic),
+      weakRowPercent(_p.weak_row_percent),
+      weakBucketP1(_p.weak_bucket_p1),
+      weakBucketP2(_p.weak_bucket_p2),
+      weakBucketP3(_p.weak_bucket_p3),
+      weakBucketP4(_p.weak_bucket_p4),
+      weakBucketX1(_p.weak_bucket_x1),
+      weakBucketX2(_p.weak_bucket_x2),
+      weakBucketX3(_p.weak_bucket_x3),
+      weakBucketX4(_p.weak_bucket_x4),
+      nonweakBucketP5(_p.nonweak_bucket_p5),
+      nonweakBucketP6(_p.nonweak_bucket_p6),
+      nonweakBucketZ1(_p.nonweak_bucket_z1),
+      nonweakBucketZ2(_p.nonweak_bucket_z2),
+      preferDeviceMapData(_p.prefer_device_map_data),
       enableEcc(_p.enable_ecc),
       pMatrixFileName(_p.p_matrix),
       eccAlgorithm(_p.ecc_algorithm),
-      generator(seedEngine_()),
       pageMgmt(_p.page_policy),
       maxAccessesPerRow(_p.max_accesses_per_row),
       timeStampOffset(0), activeRank(0),
@@ -2240,6 +2400,15 @@ DRAMInterface::DRAMInterface(const DRAMInterfaceParams &_p)
 {
     DPRINTF(DRAM, "Setting up DRAM Interface\n");
 
+    // Seed the RowHammer probability model's RNG (generator) from gem5's
+    // global seeded RNG (random_mt), which is set via m5.core.seedRandom()
+    // in the config before m5.instantiate(). This makes the synthetic
+    // weak-row/weak-cell model reproducible and controllable by the
+    // simulation seed, instead of drawing fresh, uncontrollable hardware
+    // entropy (std::random_device) on every run. Each DRAMInterface draws
+    // its own distinct-but-deterministic sub-seed from random_mt.
+    generator.seed(random_mt.random<uint64_t>());
+
     fatal_if(!isPowerOf2(burstSize), "DRAM burst size %d is not allowed, "
              "must be a power of two\n", burstSize);
 
@@ -2247,6 +2416,48 @@ DRAMInterface::DRAMInterface(const DRAMInterfaceParams &_p)
     // address decoding
     fatal_if(!isPowerOf2(ranksPerChannel), "DRAM rank count of %d is "
              "not allowed, must be a power of two\n", ranksPerChannel);
+
+    // --------------------------------------------------------------
+    // Validate the weak-row / weak-cell probability model parameters.
+    // A misconfigured model (e.g. bucket weights that don't sum to
+    // 100, or boundaries that aren't strictly increasing) would
+    // otherwise silently produce nonsensical or undefined probability
+    // values deep inside the simulation, which is far harder to debug
+    // than failing loudly here at startup.
+    // --------------------------------------------------------------
+    fatal_if(weakRowPercent < 0.0 || weakRowPercent > 100.0,
+             "weak_row_percent must be between 0 and 100, got %f\n",
+             weakRowPercent);
+
+    const double weak_bucket_sum = weakBucketX1 + weakBucketX2 +
+                                    weakBucketX3 + weakBucketX4;
+    fatal_if(std::abs(weak_bucket_sum - 100.0) > 1e-3,
+             "weak_bucket_x1..x4 must sum to 100, got %f\n",
+             weak_bucket_sum);
+
+    const double nonweak_bucket_sum = nonweakBucketZ1 + nonweakBucketZ2;
+    fatal_if(std::abs(nonweak_bucket_sum - 100.0) > 1e-3,
+             "nonweak_bucket_z1 + nonweak_bucket_z2 must sum to 100, "
+             "got %f\n", nonweak_bucket_sum);
+
+    fatal_if(weakBucketX1 < 0.0 || weakBucketX2 < 0.0 ||
+             weakBucketX3 < 0.0 || weakBucketX4 < 0.0,
+             "weak_bucket_x1..x4 must each be non-negative\n");
+
+    fatal_if(nonweakBucketZ1 < 0.0 || nonweakBucketZ2 < 0.0,
+             "nonweak_bucket_z1/z2 must each be non-negative\n");
+
+    fatal_if(!(0.0 <= weakBucketP1 && weakBucketP1 < weakBucketP2 &&
+               weakBucketP2 < weakBucketP3 && weakBucketP3 < weakBucketP4 &&
+               weakBucketP4 <= 1.0),
+             "weak_bucket_p1..p4 must satisfy "
+             "0 <= p1 < p2 < p3 < p4 <= 1, got %f, %f, %f, %f\n",
+             weakBucketP1, weakBucketP2, weakBucketP3, weakBucketP4);
+
+    fatal_if(!(0.0 <= nonweakBucketP5 && nonweakBucketP5 < nonweakBucketP6 &&
+               nonweakBucketP6 <= 1.0),
+             "nonweak_bucket_p5/p6 must satisfy 0 <= p5 < p6 <= 1, "
+             "got %f, %f\n", nonweakBucketP5, nonweakBucketP6);
 
     for (int i = 0; i < ranksPerChannel; i++) {
         DPRINTF(DRAM, "Creating DRAM rank %d \n", i);

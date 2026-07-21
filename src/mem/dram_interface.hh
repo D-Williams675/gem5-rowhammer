@@ -47,6 +47,8 @@
 #define __DRAM_INTERFACE_HH__
 
 #include <random>
+
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 
@@ -568,6 +570,37 @@ class DRAMInterface : public MemInterface
 
     const bool syntheticTraffic;
 
+    // --------------------------------------------------------------
+    // Parameterized weak-row / weak-cell probability model params.
+    // See DRAMInterface.py for full descriptions, and isRowWeak() /
+    // getCellFlipProbability() / sampleBucketedProbability() in
+    // dram_interface.cc for how these are used. Values are validated
+    // in the constructor (bucket weights must sum to 100, bucket
+    // boundaries must be strictly increasing within [0, 1]).
+    // --------------------------------------------------------------
+    const double weakRowPercent;
+
+    const double weakBucketP1;
+    const double weakBucketP2;
+    const double weakBucketP3;
+    const double weakBucketP4;
+
+    const double weakBucketX1;
+    const double weakBucketX2;
+    const double weakBucketX3;
+    const double weakBucketX4;
+
+    const double nonweakBucketP5;
+    const double nonweakBucketP6;
+
+    const double nonweakBucketZ1;
+    const double nonweakBucketZ2;
+
+    // See DRAMInterface.py: when true, real device_map data (if
+    // available for a row) is preferred over the synthetic
+    // weak-row/weak-cell probability model. See selectVictimColumn().
+    const bool preferDeviceMapData;
+
     // to implement ECC, there are a couple of parameters that the user needs
     // to specify
     const bool enableEcc;
@@ -589,12 +622,10 @@ class DRAMInterface : public MemInterface
     std::uniform_int_distribution<uint64_t> another_distribution;
 
 
-    // // std::random_device rd;
+    // RNG for the RowHammer probability model. Seeded from gem5's global
+    // random_mt (via m5.core.seedRandom()) in the DRAMInterface constructor,
+    // so results are reproducible and controllable by the simulation seed.
     std::mt19937_64 generator;
-    static std::mt19937_64 seedEngine_() {
-        std::random_device rd;
-        return std::mt19937_64{ static_cast<std::mt19937_64::result_type>(rd()) };
-    }
 
 
     uint64_t num_trr_refreshes = 0;
@@ -656,6 +687,71 @@ class DRAMInterface : public MemInterface
      */
     void doMemoryCorruption(MemPacket* mem_pkt, uint8_t bank, uint32_t row,
                                     uint16_t col, int distance);
+
+    /**
+     * Parameterized weak-row / weak-cell probability model.
+     *
+     * Not every DRAM row is equally susceptible to RowHammer, and not
+     * every cell within a "weak" row is equally susceptible either.
+     * This models that behavior using two levels:
+     *
+     *   1) Each row is classified once as weak or non-weak, weighted by
+     *      weakRowPercent (see isRowWeak()).
+     *   2) Each individual cell within a row is assigned a specific
+     *      flip probability, drawn from one of four buckets (weak rows)
+     *      or two buckets (non-weak rows) (see getCellFlipProbability()
+     *      and sampleBucketedProbability()).
+     *
+     * Both classifications are decided lazily (the first time a row or
+     * cell is actually queried) and cached in the owning Bank for the
+     * remainder of the simulation, since real DRAM weakness is a fixed
+     * physical property and must not change between accesses.
+     *
+     * Methodology follows Edara et al., "PROOF: Predetermined
+     * Signature-based On-chip Online Rowhammer Bit-Flip Detection"
+     * (ICEdge 2025).
+     */
+
+    /**
+     * Returns whether the given row is classified as "weak". The
+     * classification is decided the first time this is called for a
+     * given row, then cached in bank_ref.rowWeakness.
+     */
+    bool isRowWeak(Bank& bank_ref, uint32_t row);
+
+    /**
+     * Draws a single flip-probability value from the weak-row bucket
+     * set (if weak is true) or the non-weak-row bucket set (if weak is
+     * false), following the configured bucket weights/boundaries.
+     * Does NOT cache anything itself -- callers (getCellFlipProbability)
+     * are responsible for caching the result per-cell.
+     */
+    double sampleBucketedProbability(bool weak);
+
+    /**
+     * Returns the cached flip probability for a specific (row, column)
+     * cell, generating and caching it via sampleBucketedProbability()
+     * the first time this exact cell is queried.
+     */
+    double getCellFlipProbability(Bank& bank_ref, uint32_t row,
+                                    uint16_t col);
+
+    /**
+     * Picks a column uniformly at random within victim_row, then
+     * decides -- based on that specific cell's flip probability --
+     * whether this hammering attempt actually produces a bit flip.
+     * Also respects the existing "already flipped, not yet rewritten"
+     * bookkeeping via flagged_entries, so a cell cannot flip twice in a
+     * row without an intervening write.
+     *
+     * On return, `col` is set to whichever column was tested,
+     * regardless of whether it flipped, so callers can still log the
+     * attempted column consistently with prior behavior.
+     *
+     * Returns true if a bitflip should occur at (victim_row, col).
+     */
+    bool selectVictimColumn(Bank& bank_ref, uint32_t victim_row,
+                                    uint16_t& col);
 
 
     /**

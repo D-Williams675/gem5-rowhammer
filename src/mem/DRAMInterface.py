@@ -160,6 +160,75 @@ class DRAMInterface(MemInterface):
         "Set this to true to enable functional ECC for data correction"
     )
 
+    # ------------------------------------------------------------------
+    # Per-row / per-cell probabilistic bitflip model.
+    #
+    # Not every DRAM row is equally susceptible to RowHammer, and not
+    # every cell within a "weak" row is equally susceptible either. This
+    # model classifies each row as weak/non-weak (weighted by
+    # weak_row_percent), then assigns each individual cell a specific
+    # flip probability drawn from one of four buckets (for weak rows) or
+    # two buckets (for non-weak rows). This mirrors the methodology
+    # described in Edara et al., "PROOF: Predetermined Signature-based
+    # On-chip Online Rowhammer Bit-Flip Detection" (ICEdge 2025).
+    #
+    # Row/cell classifications are decided lazily (the first time a row
+    # or cell is touched) and cached for the remainder of the
+    # simulation, since real DRAM weakness is a fixed physical property,
+    # not something that should change between accesses.
+    # ------------------------------------------------------------------
+
+    # Percentage (0-100) of DRAM rows classified as "weak".
+    weak_row_percent = Param.Float(
+        30.0,
+        "Percentage of DRAM rows classified as weak (y in the model)."
+    )
+
+    # Weak-row bucket boundaries: 0 < p1 < p2 < p3 < p4 <= 1
+    weak_bucket_p1 = Param.Float(0.10, "Upper bound of weak bucket 1 (0-p1)")
+    weak_bucket_p2 = Param.Float(0.50, "Upper bound of weak bucket 2 (p1-p2)")
+    weak_bucket_p3 = Param.Float(0.80, "Upper bound of weak bucket 3 (p2-p3)")
+    weak_bucket_p4 = Param.Float(1.00, "Upper bound of weak bucket 4 (p3-p4)")
+
+    # Weak-row bucket weights (percentages, must sum to 100).
+    weak_bucket_x1 = Param.Float(32.0, "%% of weak-row cells in bucket 1")
+    weak_bucket_x2 = Param.Float(10.0, "%% of weak-row cells in bucket 2")
+    weak_bucket_x3 = Param.Float(16.0, "%% of weak-row cells in bucket 3")
+    weak_bucket_x4 = Param.Float(42.0, "%% of weak-row cells in bucket 4")
+
+    # Non-weak-row bucket boundaries: 0 < p5 < p6 <= 1
+    nonweak_bucket_p5 = Param.Float(
+        0.01, "Upper bound of non-weak bucket 1 (0-p5)"
+    )
+    nonweak_bucket_p6 = Param.Float(
+        0.05, "Upper bound of non-weak bucket 2 (p5-p6)"
+    )
+
+    # Non-weak-row bucket weights (percentages, must sum to 100).
+    nonweak_bucket_z1 = Param.Float(
+        90.0, "%% of non-weak-row cells in bucket 1"
+    )
+    nonweak_bucket_z2 = Param.Float(
+        10.0, "%% of non-weak-row cells in bucket 2"
+    )
+
+    # When True (default, matches original HammerSim behavior): for any
+    # row that has real hardware-measured weak-column data available
+    # (loaded via device_file), that real data is used instead of the
+    # synthetic weak-row/weak-cell probability model above. Rows with
+    # no real data always use the synthetic model regardless of this
+    # setting, since there is nothing else to fall back on.
+    #
+    # When False: the synthetic parameterized model (weak_row_percent
+    # and the bucket parameters above) is used for every row, even
+    # rows that do have real measured data available -- useful for
+    # experimenting with the synthetic model in isolation.
+    prefer_device_map_data = Param.Bool(
+        True,
+        "Use real device_map data (if available for a row) over the "
+        "synthetic weak-row/weak-cell probability model."
+    )
+
     # pMatrix
     p_matrix = Param.String(
         "NULL",
