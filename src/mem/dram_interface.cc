@@ -50,6 +50,7 @@
 #include "debug/DRAMState.hh"
 #include "debug/HDBitflip.hh"
 #include "debug/RhBitflip.hh"
+#include "debug/RhBucket.hh"
 #include "debug/RhInhibitor.hh"
 #include "debug/RowHammer.hh"
 #include "debug/RhCorruption.hh"
@@ -800,6 +801,27 @@ DRAMInterface::selectVictimColumn(Bank& bank_ref, uint32_t victim_row,
     bool flips = (roll < flip_prob);
     if (flips) {
         bank_ref.flagged_entries[victim_row][col] = 1;
+
+        // Optional per-flip logging for offline per-category statistics
+        // (enable with --debug-flags=RhBucket). Classify the flipped
+        // cell into the report categories by its own flip probability,
+        // using the weak-row bucket boundaries:
+        //   X (very weak):   [p3, p4]  i.e. >= 0.80
+        //   Y (weak):        [p2, p3)  i.e. 0.50-0.80
+        //   Z (strong):      [p1, p2)  i.e. 0.10-0.50
+        //   P (very strong): [0,  p1)  i.e. < 0.10
+        // The `weak` field records whether the row itself was weak, so
+        // non-weak-row flips (whose probabilities all land in the P
+        // range) can be separated out during analysis.
+        const char* category;
+        if (flip_prob >= weakBucketP3) category = "X";
+        else if (flip_prob >= weakBucketP2) category = "Y";
+        else if (flip_prob >= weakBucketP1) category = "Z";
+        else category = "P";
+        DPRINTF(RhBucket,
+            "Bucket flip bank %d row %d col %d weak %d prob %f bucket %s\n",
+            bank_ref.bank, victim_row, col,
+            isRowWeak(bank_ref, victim_row) ? 1 : 0, flip_prob, category);
     }
     return flips;
 }
