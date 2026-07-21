@@ -246,6 +246,7 @@ DRAMInterface::checkRowHammer(Bank& bank_ref, MemPacket* mem_pkt)
                 // HDBitflip is enabled.
                 stats.rowHammerTotalBitflips++;
                 stats.rowHammerHalfDoubleBitflips++;
+                logBucketFlip(bank_ref, mem_pkt->row - 2, col);
 
                 DPRINTF(HDBitflip,
                         "HD Bitflip at bank %d, row %d, col %d\n",
@@ -301,6 +302,7 @@ DRAMInterface::checkRowHammer(Bank& bank_ref, MemPacket* mem_pkt)
             if (bitflip) {
                 stats.rowHammerTotalBitflips++;
                 stats.rowHammerHalfDoubleBitflips++;
+                logBucketFlip(bank_ref, mem_pkt->row + 2, col);
 
                 DPRINTF(HDBitflip,
                         "HD Bitflip at bank %d, row %d, col %d\n",
@@ -427,6 +429,7 @@ DRAMInterface::checkRowHammer(Bank& bank_ref, MemPacket* mem_pkt)
 
                     outfile.close();
                 }
+                logBucketFlip(bank_ref, mem_pkt->row - 1, col);
                 DPRINTF(RhBitflip,
                   "Bitflip at bank %d, row %d, col %d, single-sided %d\n",
                   bank_ref.bank, mem_pkt->row - 1,
@@ -570,6 +573,7 @@ DRAMInterface::checkRowHammer(Bank& bank_ref, MemPacket* mem_pkt)
 
                     outfile.close();
                 }
+                logBucketFlip(bank_ref, mem_pkt->row + 1, col);
                 DPRINTF(RhBitflip,
                     "Bitflip at bank %d, row %d, col %d, single-sided \
                     %d\n",
@@ -801,29 +805,49 @@ DRAMInterface::selectVictimColumn(Bank& bank_ref, uint32_t victim_row,
     bool flips = (roll < flip_prob);
     if (flips) {
         bank_ref.flagged_entries[victim_row][col] = 1;
-
-        // Optional per-flip logging for offline per-category statistics
-        // (enable with --debug-flags=RhBucket). Classify the flipped
-        // cell into the report categories by its own flip probability,
-        // using the weak-row bucket boundaries:
-        //   X (very weak):   [p3, p4]  i.e. >= 0.80
-        //   Y (weak):        [p2, p3)  i.e. 0.50-0.80
-        //   Z (strong):      [p1, p2)  i.e. 0.10-0.50
-        //   P (very strong): [0,  p1)  i.e. < 0.10
-        // The `weak` field records whether the row itself was weak, so
-        // non-weak-row flips (whose probabilities all land in the P
-        // range) can be separated out during analysis.
-        const char* category;
-        if (flip_prob >= weakBucketP3) category = "X";
-        else if (flip_prob >= weakBucketP2) category = "Y";
-        else if (flip_prob >= weakBucketP1) category = "Z";
-        else category = "P";
-        DPRINTF(RhBucket,
-            "Bucket flip bank %d row %d col %d weak %d prob %f bucket %s\n",
-            bank_ref.bank, victim_row, col,
-            isRowWeak(bank_ref, victim_row) ? 1 : 0, flip_prob, category);
     }
     return flips;
+}
+
+void
+DRAMInterface::logBucketFlip(Bank& bank_ref, uint32_t row, uint16_t col)
+{
+    // Optional per-flip logging for offline per-category statistics
+    // (enable with --debug-flags=RhBucket). Called ONLY from the commit
+    // sites in checkRowHammer, i.e. after a bit flip has actually been
+    // committed (both the macro-level rowhammer probability gate and the
+    // cell-level weak-cell gate in selectVictimColumn have passed) -- so
+    // the counts here match the committed bit flips, not the larger set
+    // of cells selectVictimColumn merely considered.
+    //
+    // The flipped cell's probability was cached by getCellFlipProbability
+    // during selectVictimColumn; look it up and classify into the report
+    // categories using the weak-row bucket boundaries:
+    //   X (very weak):   [p3, 1]   i.e. >= 0.80
+    //   Y (weak):        [p2, p3)  i.e. 0.50-0.80
+    //   Z (strong):      [p1, p2)  i.e. 0.10-0.50
+    //   P (very strong): [0,  p1)  i.e. < 0.10
+    // The `weak` field records whether the row itself was weak, so
+    // non-weak-row flips (whose probabilities all land in the P range)
+    // can be separated out during analysis. Cells flipped via the real
+    // device_map path have no cached probability and are skipped.
+    auto row_it = bank_ref.cellFlipProb.find(row);
+    if (row_it == bank_ref.cellFlipProb.end())
+        return;
+    auto col_it = row_it->second.find(col);
+    if (col_it == row_it->second.end())
+        return;
+    double prob = col_it->second;
+
+    const char* category;
+    if (prob >= weakBucketP3) category = "X";
+    else if (prob >= weakBucketP2) category = "Y";
+    else if (prob >= weakBucketP1) category = "Z";
+    else category = "P";
+    DPRINTF(RhBucket,
+        "Bucket flip bank %d row %d col %d weak %d prob %f bucket %s\n",
+        bank_ref.bank, row, col,
+        isRowWeak(bank_ref, row) ? 1 : 0, prob, category);
 }
 
 void

@@ -753,6 +753,14 @@ class DRAMInterface : public MemInterface
     bool selectVictimColumn(Bank& bank_ref, uint32_t victim_row,
                                     uint16_t& col);
 
+    /**
+     * Optional per-flip category logging (RhBucket debug flag). Called at
+     * each committed-bitflip site in checkRowHammer to record the flipped
+     * cell's X/Y/Z/P vulnerability category (from its cached flip
+     * probability), so committed flips can be binned per category offline.
+     */
+    void logBucketFlip(Bank& bank_ref, uint32_t row, uint16_t col);
+
 
     /**
      * Precharge a given bank and also update when the precharge is
