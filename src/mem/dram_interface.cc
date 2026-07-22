@@ -628,6 +628,62 @@ DRAMInterface::isRowWeak(Bank& bank_ref, uint32_t row)
     return bank_ref.rowWeakness[row] == 1;
 }
 
+namespace {
+// Deterministic hash of a 64-bit key to a uniform double in [0, 1).
+// splitmix64 finalizer -- gives a stable, well-distributed per-cell
+// value with no RNG state, so a cell's W0/canary role depends only on
+// (row, col, seed) and never on access order.
+inline double
+hashToUnit(uint64_t x)
+{
+    x += 0x9E3779B97F4A7C15ULL;
+    x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9ULL;
+    x = (x ^ (x >> 27)) * 0x94D049BB133111EBULL;
+    x = x ^ (x >> 31);
+    // Top 53 bits -> [0, 1).
+    return (x >> 11) * (1.0 / 9007199254740992.0);
+}
+} // anonymous namespace
+
+bool
+DRAMInterface::isCellTemperatureWeak(uint32_t row, uint16_t col) const
+{
+    // Deterministic per-cell uniform value in [0, 1), fixed for a given
+    // (row, col) and seed. Independent of temperature, so the same chip
+    // is modeled consistently across a temperature sweep.
+    const uint64_t key = (static_cast<uint64_t>(row) * 0x9E3779B1ULL)
+                         ^ (static_cast<uint64_t>(col) * 0x85EBCA77ULL)
+                         ^ tempSeedSalt;
+    const double r = hashToUnit(key);
+
+    const double w0 = w0Percent / 100.0;
+    // W0: weak at every temperature.
+    if (r < w0)
+        return true;
+
+    // Canary cells occupy the next contiguous slice of [0, 1), split
+    // into one equal sub-band per temperature range. A cell lands in at
+    // most one band, so its canary role is unique to a single range.
+    const int n_ranges =
+        (tempMax - tempMin + tempRangeSize - 1) / tempRangeSize;
+    const double canary = canaryPercent / 100.0;
+    const double canary_end = w0 + n_ranges * canary;
+    if (r >= canary_end)
+        return false;   // never weak
+
+    // Which temperature range is this cell a canary for?
+    const int cell_range = static_cast<int>((r - w0) / canary);
+    // Which temperature range are we currently at?
+    int cur_range = (temperature - tempMin) / tempRangeSize;
+    if (cur_range < 0)
+        cur_range = 0;
+    if (cur_range >= n_ranges)
+        cur_range = n_ranges - 1;
+
+    // Weak only if this cell's canary range is the current range.
+    return cell_range == cur_range;
+}
+
 double
 DRAMInterface::sampleBucketedProbability(bool weak)
 {
@@ -690,11 +746,14 @@ DRAMInterface::getCellFlipProbability(Bank& bank_ref, uint32_t row,
         }
     }
 
-    // Not cached yet: decide the row's weakness (cached separately in
-    // isRowWeak), then draw and cache this specific cell's
-    // probability so it never changes again for the rest of the
-    // simulation.
-    bool weak = isRowWeak(bank_ref, row);
+    // Not cached yet: decide the cell's weakness, then draw and cache
+    // this specific cell's probability so it never changes again for
+    // the rest of the simulation. With the temperature model enabled,
+    // weakness is a per-cell, temperature-dependent property (W0 +
+    // canary); otherwise it is the row-level weak_row_percent model.
+    bool weak = enableTemperatureModel
+                    ? isCellTemperatureWeak(row, col)
+                    : isRowWeak(bank_ref, row);
     double prob = sampleBucketedProbability(weak);
     bank_ref.cellFlipProb[row][col] = prob;
     return prob;
@@ -2433,6 +2492,13 @@ DRAMInterface::DRAMInterface(const DRAMInterfaceParams &_p)
       nonweakBucketP6(_p.nonweak_bucket_p6),
       nonweakBucketZ1(_p.nonweak_bucket_z1),
       nonweakBucketZ2(_p.nonweak_bucket_z2),
+      enableTemperatureModel(_p.enable_temperature_model),
+      temperature(_p.temperature),
+      tempMin(_p.temp_min),
+      tempMax(_p.temp_max),
+      tempRangeSize(_p.temp_range_size),
+      w0Percent(_p.w0_percent),
+      canaryPercent(_p.canary_percent),
       preferDeviceMapData(_p.prefer_device_map_data),
       enableEcc(_p.enable_ecc),
       pMatrixFileName(_p.p_matrix),
@@ -2454,6 +2520,13 @@ DRAMInterface::DRAMInterface(const DRAMInterfaceParams &_p)
     // entropy (std::random_device) on every run. Each DRAMInterface draws
     // its own distinct-but-deterministic sub-seed from random_mt.
     generator.seed(random_mt.random<uint64_t>());
+
+    // Salt for the temperature model's per-cell W0/canary assignment.
+    // Drawn from the same seeded global RNG so the assignment is
+    // reproducible per seed, but it is independent of the temperature
+    // parameter -- so sweeping temperature at a fixed seed studies the
+    // SAME chip (same W0 and canary cells) at different temperatures.
+    tempSeedSalt = random_mt.random<uint64_t>();
 
     fatal_if(!isPowerOf2(burstSize), "DRAM burst size %d is not allowed, "
              "must be a power of two\n", burstSize);
@@ -2504,6 +2577,30 @@ DRAMInterface::DRAMInterface(const DRAMInterfaceParams &_p)
                nonweakBucketP6 <= 1.0),
              "nonweak_bucket_p5/p6 must satisfy 0 <= p5 < p6 <= 1, "
              "got %f, %f\n", nonweakBucketP5, nonweakBucketP6);
+
+    // Validate the temperature-dependent weak-cell model parameters.
+    if (enableTemperatureModel) {
+        fatal_if(tempRangeSize <= 0,
+                 "temp_range_size must be > 0, got %d\n", tempRangeSize);
+        fatal_if(tempMax <= tempMin,
+                 "temp_max (%d) must be greater than temp_min (%d)\n",
+                 tempMax, tempMin);
+        fatal_if(temperature < tempMin || temperature > tempMax,
+                 "temperature (%d) must be within [temp_min, temp_max] "
+                 "= [%d, %d]\n", temperature, tempMin, tempMax);
+        fatal_if(w0Percent < 0.0 || canaryPercent < 0.0,
+                 "w0_percent and canary_percent must be non-negative\n");
+        // Number of temperature ranges (round up so the top edge is
+        // covered), then make sure W0 + all canary sets fit in 100%.
+        const int n_ranges =
+            (tempMax - tempMin + tempRangeSize - 1) / tempRangeSize;
+        const double used = w0Percent + n_ranges * canaryPercent;
+        fatal_if(used > 100.0 + 1e-6,
+                 "w0_percent (%f) + n_ranges (%d) * canary_percent (%f) "
+                 "= %f exceeds 100%%; reduce canary_percent or widen "
+                 "temp_range_size\n",
+                 w0Percent, n_ranges, canaryPercent, used);
+    }
 
     for (int i = 0; i < ranksPerChannel; i++) {
         DPRINTF(DRAM, "Creating DRAM rank %d \n", i);

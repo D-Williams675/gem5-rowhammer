@@ -596,6 +596,24 @@ class DRAMInterface : public MemInterface
     const double nonweakBucketZ1;
     const double nonweakBucketZ2;
 
+    // --------------------------------------------------------------
+    // Temperature-dependent weak-cell model (SpyHammer, Orosa 2022).
+    // See DRAMInterface.py and isCellTemperatureWeak(). When enabled,
+    // a cell is weak if it belongs to W0 (weak at all temperatures)
+    // or is a "canary" cell for the current temperature range (weak
+    // only at that one range). tempSeedSalt makes the fixed per-cell
+    // W0/canary assignment reproducible and controllable by the
+    // simulation seed, without changing across a temperature sweep.
+    // --------------------------------------------------------------
+    const bool enableTemperatureModel;
+    const int temperature;
+    const int tempMin;
+    const int tempMax;
+    const int tempRangeSize;
+    const double w0Percent;
+    const double canaryPercent;
+    uint64_t tempSeedSalt;
+
     // See DRAMInterface.py: when true, real device_map data (if
     // available for a row) is preferred over the synthetic
     // weak-row/weak-cell probability model. See selectVictimColumn().
@@ -718,6 +736,17 @@ class DRAMInterface : public MemInterface
      * given row, then cached in bank_ref.rowWeakness.
      */
     bool isRowWeak(Bank& bank_ref, uint32_t row);
+
+    /**
+     * Temperature-dependent weak-cell classification (SpyHammer model).
+     * Returns whether cell (row, col) is weak at the currently configured
+     * temperature: true if the cell is in W0 (weak at all temperatures)
+     * or is a canary cell for the current temperature range. The per-cell
+     * assignment is a deterministic function of (row, col) and the seed
+     * salt, so it is fixed for a given chip/seed and does NOT change as
+     * the temperature is swept -- only which range is "active" changes.
+     */
+    bool isCellTemperatureWeak(uint32_t row, uint16_t col) const;
 
     /**
      * Draws a single flip-probability value from the weak-row bucket

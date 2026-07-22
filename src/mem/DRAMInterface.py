@@ -212,6 +212,59 @@ class DRAMInterface(MemInterface):
         10.0, "%% of non-weak-row cells in bucket 2"
     )
 
+    # ------------------------------------------------------------------
+    # Temperature-dependent weak-cell model.
+    #
+    # Models the behavior characterized in Orosa et al., "SpyHammer:
+    # Understanding and Exploiting RowHammer under Fine-Grained
+    # Temperature Variations" (2022). A DRAM chip has a fixed set of
+    # cells (W0) that are weak at every temperature, plus, at each
+    # temperature, an additional p% of "canary" cells that are weak
+    # ONLY at that temperature and not at any other. So at a given
+    # temperature the weak set is:  W0  +  (canary cells for that
+    # temperature).  The canary sets for different temperatures are
+    # disjoint (a cell that is a canary at one temperature is not a
+    # canary at another).
+    #
+    # When enable_temperature_model is True, a cell's weak/non-weak
+    # classification is decided per cell by this temperature model
+    # (replacing the row-level weak_row_percent classification); weak
+    # cells still draw their per-cell flip probability from the weak
+    # buckets above, and non-weak cells from the non-weak buckets.
+    # ------------------------------------------------------------------
+    enable_temperature_model = Param.Bool(
+        False,
+        "Enable the temperature-dependent weak-cell (W0 + canary) model. "
+        "When True it replaces the row-level weak_row_percent "
+        "classification with a per-cell, temperature-dependent one."
+    )
+
+    # Current DRAM temperature (deg C). Static for a simulation run --
+    # sweep it across runs to study flips vs. temperature.
+    temperature = Param.Int(50, "Current DRAM temperature in Celsius")
+
+    # Temperature range and bin (range) size, following the 50-95 C
+    # range characterized in the SpyHammer paper.
+    temp_min = Param.Int(50, "Minimum modeled temperature (Celsius)")
+    temp_max = Param.Int(95, "Maximum modeled temperature (Celsius)")
+    temp_range_size = Param.Int(
+        5, "Width of each temperature range/bin (Celsius). Canary cells "
+        "are weak only within their assigned range."
+    )
+
+    # W0: percentage of cells that are weak at EVERY temperature.
+    w0_percent = Param.Float(
+        30.0, "%% of cells that are weak at all temperatures (W0)."
+    )
+    # p: percentage of cells that become canary (weak at exactly one
+    # temperature range) for each temperature range. The canary sets are
+    # disjoint across ranges, so w0_percent + (#ranges * canary_percent)
+    # must not exceed 100.
+    canary_percent = Param.Float(
+        2.0, "%% of cells that are canary (weak at exactly one "
+        "temperature range) per temperature range."
+    )
+
     # When True (default, matches original HammerSim behavior): for any
     # row that has real hardware-measured weak-column data available
     # (loaded via device_file), that real data is used instead of the
