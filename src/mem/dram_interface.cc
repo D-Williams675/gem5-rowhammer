@@ -664,8 +664,15 @@ DRAMInterface::isCellTemperatureWeak(uint32_t row, uint16_t col) const
     // Canary cells occupy the next contiguous slice of [0, 1), split
     // into one equal sub-band per temperature range. A cell lands in at
     // most one band, so its canary role is unique to a single range.
+    //
+    // NOTE: tempMax is INCLUSIVE, so the number of ranges must cover it
+    // as its own range. Using (tempMax - tempMin) alone would give a
+    // range index of n_ranges for temperature == tempMax, which the
+    // clamp below would fold back into the last range -- making tempMax
+    // and the temperature just below it share a canary set and breaking
+    // the "weak at exactly one temperature range" guarantee.
     const int n_ranges =
-        (tempMax - tempMin + tempRangeSize - 1) / tempRangeSize;
+        (tempMax - tempMin) / tempRangeSize + 1;
     const double canary = canaryPercent / 100.0;
     const double canary_end = w0 + n_ranges * canary;
     if (r >= canary_end)
@@ -2590,10 +2597,11 @@ DRAMInterface::DRAMInterface(const DRAMInterfaceParams &_p)
                  "= [%d, %d]\n", temperature, tempMin, tempMax);
         fatal_if(w0Percent < 0.0 || canaryPercent < 0.0,
                  "w0_percent and canary_percent must be non-negative\n");
-        // Number of temperature ranges (round up so the top edge is
-        // covered), then make sure W0 + all canary sets fit in 100%.
+        // Number of temperature ranges (tempMax is inclusive and gets
+        // its own range -- must match isCellTemperatureWeak), then make
+        // sure W0 + all canary sets fit in 100%.
         const int n_ranges =
-            (tempMax - tempMin + tempRangeSize - 1) / tempRangeSize;
+            (tempMax - tempMin) / tempRangeSize + 1;
         const double used = w0Percent + n_ranges * canaryPercent;
         fatal_if(used > 100.0 + 1e-6,
                  "w0_percent (%f) + n_ranges (%d) * canary_percent (%f) "
