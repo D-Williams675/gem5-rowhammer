@@ -249,6 +249,19 @@ DRAMInterface::checkRowHammer(Bank& bank_ref, MemPacket* mem_pkt)
                 stats.rowHammerHalfDoubleBitflips++;
                 logBucketFlip(bank_ref, mem_pkt->row - 2, col);
 
+                // Record half-double (distance -2) victims in the trace
+                // too, so the trace carries a complete blast-radius
+                // profile. Previously only distance +/-1 victims were
+                // written here, leaving a gap at distance 2.
+                if (rhStatDump) {
+                    std::ofstream outfile;
+                    outfile.open(rhStatFile, std::ios::out | std::ios::app);
+                    outfile << "Bitflip at bank " << (int)bank_ref.bank
+                            << " row " << mem_pkt->row - 2 << " col " << col
+                            << " half-double 1 distance -2" << std::endl;
+                    outfile.close();
+                }
+
                 DPRINTF(HDBitflip,
                         "HD Bitflip at bank %d, row %d, col %d\n",
                         bank_ref.bank, mem_pkt->row - 2,
@@ -305,6 +318,17 @@ DRAMInterface::checkRowHammer(Bank& bank_ref, MemPacket* mem_pkt)
                 stats.rowHammerTotalBitflips++;
                 stats.rowHammerHalfDoubleBitflips++;
                 logBucketFlip(bank_ref, mem_pkt->row + 2, col);
+
+                // See the distance -2 case above: record half-double
+                // victims in the trace for a complete distance profile.
+                if (rhStatDump) {
+                    std::ofstream outfile;
+                    outfile.open(rhStatFile, std::ios::out | std::ios::app);
+                    outfile << "Bitflip at bank " << (int)bank_ref.bank
+                            << " row " << mem_pkt->row + 2 << " col " << col
+                            << " half-double 1 distance 2" << std::endl;
+                    outfile.close();
+                }
 
                 DPRINTF(HDBitflip,
                         "HD Bitflip at bank %d, row %d, col %d\n",
@@ -428,7 +452,7 @@ DRAMInterface::checkRowHammer(Bank& bank_ref, MemPacket* mem_pkt)
                     outfile << "Bitflip at bank " <<
                             (int)bank_ref.bank << " row " << mem_pkt->row - 1
                             << " col " << col << " single-sided " <<
-                            single_sided << std::endl;
+                            single_sided << " distance -1" << std::endl;
 
                     outfile.close();
                 }
@@ -573,7 +597,8 @@ DRAMInterface::checkRowHammer(Bank& bank_ref, MemPacket* mem_pkt)
                     outfile << "Bitflip at bank " << (int)bank_ref.bank
                             << " row "
                             << mem_pkt->row + 1 << " col " << col
-                            << " single-sided " << single_sided << std::endl;
+                            << " single-sided " << single_sided
+                            << " distance 1" << std::endl;
 
                     outfile.close();
                 }
