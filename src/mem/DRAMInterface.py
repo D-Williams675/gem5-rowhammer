@@ -216,9 +216,10 @@ class DRAMInterface(MemInterface):
     # RowHammer blast radius.
     #
     # Hammering an aggressor row r can induce bit flips in victim rows
-    # beyond the immediately adjacent ones: flips are observed as far as
-    # r +/- 5, but with a sharply decreasing probability as the distance
-    # grows (see Yaglikci et al., "BlockHammer", HPCA 2021).
+    # beyond the immediately adjacent ones: flips are observed out to
+    # r +/- 6 (the blast radius), with a decreasing probability as the
+    # distance grows (Yaglikci et al., "BlockHammer", HPCA 2021, Sec. 6,
+    # which reports worst-case blast radius r_blast = 6).
     #
     # blast_radius sets the maximum |r_victim - r_aggressor| distance at
     # which flips can occur. blast_radius_factors gives the multiplier
@@ -238,9 +239,10 @@ class DRAMInterface(MemInterface):
         "blast radius entirely, exactly preserving the original "
         "HammerSim behavior (distance-1 victims via the single/double- "
         "sided path, distance-2 victims only via the rare half-double "
-        "path). Set to 5 to model the wider blast radius reported in the "
-        "literature, which adds proximity-induced victims at distances "
-        "2..5 with the per-distance probabilities below."
+        "path). Set to 6 to model the full blast radius reported by "
+        "BlockHammer (worst-case r_blast = 6), which adds "
+        "proximity-induced victims at distances 2..6 with the "
+        "per-distance probabilities below."
     )
 
     # Per-distance multiplier applied to a victim cell's flip probability.
@@ -253,15 +255,24 @@ class DRAMInterface(MemInterface):
     # it. Indices 1+ shape the proximity-induced victims at distances
     # 2..blast_radius, and decrease monotonically with distance.
     #
-    # NOTE: these decay values encode the qualitative behavior reported in
-    # the literature (a sharp drop per row of distance) and are meant to be
-    # CALIBRATED against the specific per-distance measurements being
-    # modeled -- they are not taken verbatim from any characterization
-    # figure.
+    # The defaults are the "blast impact factor" (c_k) from Yaglikci et al.,
+    # "BlockHammer" (HPCA 2021), Section 6: c_k = 0.5^(k-1) with a blast
+    # radius of 6. These are the WORST-CASE values observed across more
+    # than 1500 real DRAM chips from multiple vendors, standards, and
+    # generations (2010-2020), per the characterization studies BlockHammer
+    # cites. Substituting them into the paper's Equation 3 reproduces its
+    # stated NRH* = 0.2539 x NRH exactly, which confirms the values.
+    #
+    # NOTE on interpretation: BlockHammer defines c_k as a weight on the
+    # effective ACTIVATION COUNT (disturbance = N x c_k), whereas this
+    # parameter scales a victim cell's FLIP PROBABILITY. Using c_k as the
+    # relative per-distance weight is the natural analog for a
+    # probabilistic model, but the two are not formally identical.
     blast_radius_factors = VectorParam.Float(
-        [1.0, 0.2, 0.05, 0.01, 0.002],
+        [1.0, 0.5, 0.25, 0.125, 0.0625, 0.03125],
         "Per-distance multiplier on a victim cell's flip probability "
-        "(index 0 = distance 1, index 1 = distance 2, ...). Index 0 is "
+        "(index 0 = distance 1, index 1 = distance 2, ...). Defaults to "
+        "the BlockHammer blast impact factor c_k = 0.5^(k-1). Index 0 is "
         "1.0 since distance-1 rarity is already modeled by its own "
         "probability gate; later indices carry the blast-radius decay."
     )
