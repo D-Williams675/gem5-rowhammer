@@ -75,9 +75,9 @@ parser.add_argument("--temp-range-size", type=int, default=5,
 parser.add_argument("--w0-percent", type=float, default=30.0,
                     help="%% of cells weak at all temperatures, W0 "
                          "(default: 30).")
-parser.add_argument("--blast-radius", type=int, default=2,
+parser.add_argument("--blast-radius", type=int, default=1,
                     help="Max aggressor-to-victim row distance for flips "
-                         "(default: 2 = original behavior; 5 = wide).")
+                         "(default: 1 = original behavior; 5 = wide blast radius).")
 parser.add_argument("--blast-factors", type=str, default=None,
                     help="Comma-separated per-distance flip-probability "
                          "multipliers, e.g. '1,1,0.05,0.01,0.002'.")

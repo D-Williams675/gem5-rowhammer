@@ -929,10 +929,19 @@ void
 DRAMInterface::checkBlastRadiusVictims(Bank& bank_ref, MemPacket* mem_pkt,
                                         bool single_sided)
 {
-    // Distances 1 and 2 are already handled by the existing
-    // single/double-sided and half-double paths in checkRowHammer, so
-    // this only covers the extended blast radius (3 .. blastRadius).
-    for (int d = 3; d <= blastRadius; d++) {
+    // Distance 1 has its own dedicated (and already calibrated)
+    // single/double-sided path in checkRowHammer, so the proximity
+    // model here covers distances 2 .. blastRadius.
+    //
+    // Distance 2 is included deliberately. The pre-existing half-double
+    // path also targets row +/-2, but it models a DIFFERENT, specific
+    // attack pattern and is gated by half_double_prob (typically set so
+    // large -- e.g. 1e18 -- that it essentially never fires). Without
+    // distance 2 here, the blast-radius profile is non-monotonic: rows
+    // at distance 2 would see far fewer flips than rows at distance 3,
+    // which is physically backwards. Ordinary proximity-induced flips
+    // at distance 2 therefore come from this path.
+    for (int d = 2; d <= blastRadius; d++) {
         const double factor = blastRadiusFactor(d);
         if (factor <= 0.0)
             continue;

@@ -232,30 +232,38 @@ class DRAMInterface(MemInterface):
     # verbatim from any single characterization figure.
     # ------------------------------------------------------------------
     blast_radius = Param.Int(
-        2,
-        "Maximum aggressor-to-victim row distance at which RowHammer bit "
-        "flips can occur. 2 preserves the original HammerSim behavior "
-        "(only rows r+/-1 and r+/-2); set to 5 to model the wider blast "
-        "radius reported in the literature."
+        1,
+        "Maximum aggressor-to-victim row distance for proximity-induced "
+        "RowHammer bit flips. 1 (the default) disables the extended "
+        "blast radius entirely, exactly preserving the original "
+        "HammerSim behavior (distance-1 victims via the single/double- "
+        "sided path, distance-2 victims only via the rare half-double "
+        "path). Set to 5 to model the wider blast radius reported in the "
+        "literature, which adds proximity-induced victims at distances "
+        "2..5 with the per-distance probabilities below."
     )
 
     # Per-distance multiplier applied to a victim cell's flip probability.
     # Index 0 is distance 1 (immediately adjacent row), index 1 distance 2,
     # and so on. Must have at least blast_radius entries, each in [0, 1].
     #
-    # Distances 1 and 2 default to 1.0 deliberately: the relative rarity of
-    # those victims is ALREADY modeled by the existing separate probability
-    # gates in checkRowHammer (single_sided_prob / double_sided_prob for
-    # distance 1, half_double_prob for distance 2). Applying a decay factor
-    # there too would double-count it and silently change previously
-    # calibrated results. The decay below therefore only shapes the NEW
-    # distances (3+), which have no such pre-existing gate.
+    # Index 0 (distance 1) is kept at 1.0 because distance-1 victims have
+    # their own already-calibrated path (single_sided_prob /
+    # double_sided_prob); applying a decay there too would double-count
+    # it. Indices 1+ shape the proximity-induced victims at distances
+    # 2..blast_radius, and decrease monotonically with distance.
+    #
+    # NOTE: these decay values encode the qualitative behavior reported in
+    # the literature (a sharp drop per row of distance) and are meant to be
+    # CALIBRATED against the specific per-distance measurements being
+    # modeled -- they are not taken verbatim from any characterization
+    # figure.
     blast_radius_factors = VectorParam.Float(
-        [1.0, 1.0, 0.05, 0.01, 0.002],
+        [1.0, 0.2, 0.05, 0.01, 0.002],
         "Per-distance multiplier on a victim cell's flip probability "
-        "(index 0 = distance 1). Distances 1-2 default to 1.0 because "
-        "their rarity is already modeled by the existing probability "
-        "gates; distances 3+ carry the blast-radius decay."
+        "(index 0 = distance 1, index 1 = distance 2, ...). Index 0 is "
+        "1.0 since distance-1 rarity is already modeled by its own "
+        "probability gate; later indices carry the blast-radius decay."
     )
 
     # ------------------------------------------------------------------
