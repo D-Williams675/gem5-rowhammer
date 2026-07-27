@@ -237,7 +237,8 @@ DRAMInterface::checkRowHammer(Bank& bank_ref, MemPacket* mem_pkt)
             // column an equal chance regardless of how weak it
             // actually was.
             uint16_t col;
-            if (!selectVictimColumn(bank_ref, mem_pkt->row - 2, col)) {
+            if (!selectVictimColumn(bank_ref, mem_pkt->row - 2, col,
+                                    blastRadiusFactor(2))) {
                 bitflip = false;
             }
 
@@ -295,7 +296,8 @@ DRAMInterface::checkRowHammer(Bank& bank_ref, MemPacket* mem_pkt)
             // Parameterized weak-row/weak-cell probability model
             // (see DRAMInterface::selectVictimColumn).
             uint16_t col;
-            if (!selectVictimColumn(bank_ref, mem_pkt->row + 2, col)) {
+            if (!selectVictimColumn(bank_ref, mem_pkt->row + 2, col,
+                                    blastRadiusFactor(2))) {
                 bitflip = false;
             }
 
@@ -406,7 +408,8 @@ DRAMInterface::checkRowHammer(Bank& bank_ref, MemPacket* mem_pkt)
         if (mem_pkt->row > 0) {
             // Parameterized weak-row/weak-cell probability model
             // (see DRAMInterface::selectVictimColumn).
-            if (!selectVictimColumn(bank_ref, mem_pkt->row - 1, col)) {
+            if (!selectVictimColumn(bank_ref, mem_pkt->row - 1, col,
+                                    blastRadiusFactor(1))) {
                 bitflip_status = false;
             }
 
@@ -551,7 +554,8 @@ DRAMInterface::checkRowHammer(Bank& bank_ref, MemPacket* mem_pkt)
         if (mem_pkt->row < rowsPerBank - 2) {
             // Parameterized weak-row/weak-cell probability model
             // (see DRAMInterface::selectVictimColumn).
-            if (!selectVictimColumn(bank_ref, mem_pkt->row + 1, col)) {
+            if (!selectVictimColumn(bank_ref, mem_pkt->row + 1, col,
+                                    blastRadiusFactor(1))) {
                 bitflip_status = false;
             }
 
@@ -607,6 +611,13 @@ DRAMInterface::checkRowHammer(Bank& bank_ref, MemPacket* mem_pkt)
                 // bank_ref.rhTriggers[mem_pkt->row - 1][3] = 0;
             }
         }
+
+        // Extended blast radius: this aggressor row was hammered past the
+        // RowHammer threshold, so also check victim rows further away
+        // (distances 3 .. blast_radius on both sides), each with its own
+        // sharply reduced per-distance flip probability. Distances 1 and
+        // 2 were handled above. No-op when blast_radius <= 2.
+        checkBlastRadiusVictims(bank_ref, mem_pkt, single_sided);
     }
 }
 
@@ -768,7 +779,7 @@ DRAMInterface::getCellFlipProbability(Bank& bank_ref, uint32_t row,
 
 bool
 DRAMInterface::selectVictimColumn(Bank& bank_ref, uint32_t victim_row,
-                                    uint16_t& col)
+                                    uint16_t& col, double dist_factor)
 {
     assert(victim_row < bank_ref.flagged_entries.size());
 
@@ -863,7 +874,11 @@ DRAMInterface::selectVictimColumn(Bank& bank_ref, uint32_t victim_row,
         return false;
     }
 
-    double flip_prob = getCellFlipProbability(bank_ref, victim_row, col);
+    // Scale the cell's own flip probability by the blast-radius factor
+    // for this aggressor-to-victim distance: cells further from the
+    // aggressor row are far less likely to flip (see BlockHammer).
+    double flip_prob =
+        getCellFlipProbability(bank_ref, victim_row, col) * dist_factor;
 
     std::uniform_real_distribution<double> unit_dist(0.0, 1.0);
     double roll = unit_dist(generator);
@@ -873,6 +888,72 @@ DRAMInterface::selectVictimColumn(Bank& bank_ref, uint32_t victim_row,
         bank_ref.flagged_entries[victim_row][col] = 1;
     }
     return flips;
+}
+
+double
+DRAMInterface::blastRadiusFactor(int distance) const
+{
+    if (distance < 1 || distance > blastRadius)
+        return 0.0;
+    // blastRadiusFactors is 0-indexed by (distance - 1); size was
+    // validated against blastRadius in the constructor.
+    return blastRadiusFactors[distance - 1];
+}
+
+void
+DRAMInterface::checkBlastRadiusVictims(Bank& bank_ref, MemPacket* mem_pkt,
+                                        bool single_sided)
+{
+    // Distances 1 and 2 are already handled by the existing
+    // single/double-sided and half-double paths in checkRowHammer, so
+    // this only covers the extended blast radius (3 .. blastRadius).
+    for (int d = 3; d <= blastRadius; d++) {
+        const double factor = blastRadiusFactor(d);
+        if (factor <= 0.0)
+            continue;
+
+        // Both sides of the aggressor row.
+        for (int sign = -1; sign <= 1; sign += 2) {
+            const int64_t victim = (int64_t)mem_pkt->row + sign * d;
+            // Stay inside the bank: the victim row must exist and be
+            // within the arrays sized for rowsPerBank.
+            if (victim < 0 || victim >= (int64_t)rowsPerBank)
+                continue;
+            const uint32_t victim_row = (uint32_t)victim;
+            if (victim_row >= bank_ref.flagged_entries.size())
+                continue;
+
+            uint16_t col;
+            if (!selectVictimColumn(bank_ref, victim_row, col, factor))
+                continue;
+
+            stats.rowHammerTotalBitflips++;
+            if (single_sided)
+                stats.rowHammerSingleSidedBitflips++;
+            else
+                stats.rowHammerDoubleSidedBitflips++;
+
+            if (rhStatDump) {
+                std::ofstream outfile;
+                outfile.open(rhStatFile, std::ios::out | std::ios::app);
+                outfile << "Bitflip at bank " << (int)bank_ref.bank
+                        << " row " << victim_row << " col " << col
+                        << " single-sided " << (single_sided ? 1 : 0)
+                        << " distance " << (sign * d) << std::endl;
+                outfile.close();
+            }
+
+            logBucketFlip(bank_ref, victim_row, col);
+
+            DPRINTF(RhBitflip,
+                "Bitflip at bank %d, row %d, col %d, distance %d\n",
+                bank_ref.bank, victim_row, col, sign * d);
+
+            if (enableMemoryCorruption)
+                doMemoryCorruption(mem_pkt, bank_ref.bank, victim_row,
+                                    col, sign * d);
+        }
+    }
 }
 
 void
@@ -2499,6 +2580,9 @@ DRAMInterface::DRAMInterface(const DRAMInterfaceParams &_p)
       nonweakBucketP6(_p.nonweak_bucket_p6),
       nonweakBucketZ1(_p.nonweak_bucket_z1),
       nonweakBucketZ2(_p.nonweak_bucket_z2),
+      blastRadius(_p.blast_radius),
+      blastRadiusFactors(_p.blast_radius_factors.begin(),
+                         _p.blast_radius_factors.end()),
       enableTemperatureModel(_p.enable_temperature_model),
       temperature(_p.temperature),
       tempMin(_p.temp_min),
@@ -2584,6 +2668,19 @@ DRAMInterface::DRAMInterface(const DRAMInterfaceParams &_p)
                nonweakBucketP6 <= 1.0),
              "nonweak_bucket_p5/p6 must satisfy 0 <= p5 < p6 <= 1, "
              "got %f, %f\n", nonweakBucketP5, nonweakBucketP6);
+
+    // Validate the blast-radius parameters.
+    fatal_if(blastRadius < 1,
+             "blast_radius must be at least 1, got %d\n", blastRadius);
+    fatal_if((int)blastRadiusFactors.size() < blastRadius,
+             "blast_radius_factors has %d entries but blast_radius is %d; "
+             "provide one factor per distance\n",
+             (int)blastRadiusFactors.size(), blastRadius);
+    for (int d = 0; d < blastRadius; d++) {
+        fatal_if(blastRadiusFactors[d] < 0.0 || blastRadiusFactors[d] > 1.0,
+                 "blast_radius_factors[%d] = %f must be in [0, 1]\n",
+                 d, blastRadiusFactors[d]);
+    }
 
     // Validate the temperature-dependent weak-cell model parameters.
     if (enableTemperatureModel) {

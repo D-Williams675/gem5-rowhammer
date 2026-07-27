@@ -213,6 +213,52 @@ class DRAMInterface(MemInterface):
     )
 
     # ------------------------------------------------------------------
+    # RowHammer blast radius.
+    #
+    # Hammering an aggressor row r can induce bit flips in victim rows
+    # beyond the immediately adjacent ones: flips are observed as far as
+    # r +/- 5, but with a sharply decreasing probability as the distance
+    # grows (see Yaglikci et al., "BlockHammer", HPCA 2021).
+    #
+    # blast_radius sets the maximum |r_victim - r_aggressor| distance at
+    # which flips can occur. blast_radius_factors gives the multiplier
+    # applied to a victim cell's flip probability at distance 1, 2, 3,
+    # ... (index 0 = distance 1). A factor of 0 disables that distance.
+    #
+    # NOTE: the default factors below encode the qualitative behavior
+    # reported in the literature (roughly an order-of-magnitude drop per
+    # row of distance) and are intended to be TUNED to the specific
+    # per-distance measurements being modeled -- they are not taken
+    # verbatim from any single characterization figure.
+    # ------------------------------------------------------------------
+    blast_radius = Param.Int(
+        2,
+        "Maximum aggressor-to-victim row distance at which RowHammer bit "
+        "flips can occur. 2 preserves the original HammerSim behavior "
+        "(only rows r+/-1 and r+/-2); set to 5 to model the wider blast "
+        "radius reported in the literature."
+    )
+
+    # Per-distance multiplier applied to a victim cell's flip probability.
+    # Index 0 is distance 1 (immediately adjacent row), index 1 distance 2,
+    # and so on. Must have at least blast_radius entries, each in [0, 1].
+    #
+    # Distances 1 and 2 default to 1.0 deliberately: the relative rarity of
+    # those victims is ALREADY modeled by the existing separate probability
+    # gates in checkRowHammer (single_sided_prob / double_sided_prob for
+    # distance 1, half_double_prob for distance 2). Applying a decay factor
+    # there too would double-count it and silently change previously
+    # calibrated results. The decay below therefore only shapes the NEW
+    # distances (3+), which have no such pre-existing gate.
+    blast_radius_factors = VectorParam.Float(
+        [1.0, 1.0, 0.05, 0.01, 0.002],
+        "Per-distance multiplier on a victim cell's flip probability "
+        "(index 0 = distance 1). Distances 1-2 default to 1.0 because "
+        "their rarity is already modeled by the existing probability "
+        "gates; distances 3+ carry the blast-radius decay."
+    )
+
+    # ------------------------------------------------------------------
     # Temperature-dependent weak-cell model.
     #
     # Models the behavior characterized in Orosa et al., "SpyHammer:

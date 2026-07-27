@@ -75,6 +75,12 @@ parser.add_argument("--temp-range-size", type=int, default=5,
 parser.add_argument("--w0-percent", type=float, default=30.0,
                     help="%% of cells weak at all temperatures, W0 "
                          "(default: 30).")
+parser.add_argument("--blast-radius", type=int, default=2,
+                    help="Max aggressor-to-victim row distance for flips "
+                         "(default: 2 = original behavior; 5 = wide).")
+parser.add_argument("--blast-factors", type=str, default=None,
+                    help="Comma-separated per-distance flip-probability "
+                         "multipliers, e.g. '1,1,0.05,0.01,0.002'.")
 parser.add_argument("--canary-percent", type=float, default=2.0,
                     help="%% of canary cells weak at exactly one temperature "
                          "range (default: 2).")
@@ -148,6 +154,12 @@ class DRAM_TEST(DDR4_2400_8x8):
     temp_range_size = args.temp_range_size
     w0_percent = args.w0_percent
     canary_percent = args.canary_percent
+    # Blast radius: how far from the aggressor row flips can occur, and
+    # the per-distance flip-probability multipliers.
+    blast_radius = args.blast_radius
+    if args.blast_factors is not None:
+        blast_radius_factors = [float(x)
+                                for x in args.blast_factors.split(",")]
     # There is a very high probability for a bitflip however, bitflips become
     # highly likely as the rowhammer threshold is crossed.
     half_double_prob = 1e18

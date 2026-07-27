@@ -597,6 +597,14 @@ class DRAMInterface : public MemInterface
     const double nonweakBucketZ2;
 
     // --------------------------------------------------------------
+    // RowHammer blast radius: how far from the aggressor row bit flips
+    // can occur, and the per-distance flip-probability multiplier.
+    // See DRAMInterface.py and checkBlastRadiusVictims().
+    // --------------------------------------------------------------
+    const int blastRadius;
+    std::vector<double> blastRadiusFactors;
+
+    // --------------------------------------------------------------
     // Temperature-dependent weak-cell model (SpyHammer, Orosa 2022).
     // See DRAMInterface.py and isCellTemperatureWeak(). When enabled,
     // a cell is weak if it belongs to W0 (weak at all temperatures)
@@ -780,7 +788,25 @@ class DRAMInterface : public MemInterface
      * Returns true if a bitflip should occur at (victim_row, col).
      */
     bool selectVictimColumn(Bank& bank_ref, uint32_t victim_row,
-                                    uint16_t& col);
+                                    uint16_t& col, double dist_factor = 1.0);
+
+    /**
+     * Returns the flip-probability multiplier for a victim row at the
+     * given aggressor-to-victim distance (1 = adjacent row). Returns 0
+     * for distances beyond blastRadius, i.e. no flips can occur there.
+     */
+    double blastRadiusFactor(int distance) const;
+
+    /**
+     * Handles victim rows in the extended blast radius (distances 3 up
+     * to blastRadius, on both sides of the aggressor row). Distances 1
+     * and 2 are handled by the existing single/double-sided and
+     * half-double paths in checkRowHammer; this covers the additional
+     * rows reported in the literature, each with its own sharply
+     * reduced per-distance flip probability.
+     */
+    void checkBlastRadiusVictims(Bank& bank_ref, MemPacket* mem_pkt,
+                                    bool single_sided);
 
     /**
      * Optional per-flip category logging (RhBucket debug flag). Called at
