@@ -634,10 +634,16 @@ DRAMInterface::checkRowHammer(Bank& bank_ref, MemPacket* mem_pkt)
         }
 
         // Extended blast radius: this aggressor row was hammered past the
-        // RowHammer threshold, so also check victim rows further away
-        // (distances 3 .. blast_radius on both sides), each with its own
-        // sharply reduced per-distance flip probability. Distances 1 and
-        // 2 were handled above. No-op when blast_radius <= 2.
+        // RowHammer threshold, so also check proximity victims further
+        // away (distances 2 .. blast_radius on both sides), each with
+        // its own per-distance flip probability. Distance 1 keeps its
+        // dedicated single/double-sided path above. No-op when
+        // blast_radius < 2.
+        //
+        // Deliberately called from THIS block only. For interior rows
+        // rhTriggers[row][1] and [2] are incremented together, so the
+        // preceding block fires on the same activation; invoking this
+        // from both would generate every proximity victim twice.
         checkBlastRadiusVictims(bank_ref, mem_pkt, single_sided);
     }
 }
