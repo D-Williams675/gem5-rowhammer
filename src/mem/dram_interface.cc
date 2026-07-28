@@ -2654,14 +2654,26 @@ DRAMInterface::DRAMInterface(const DRAMInterfaceParams &_p)
     // simulation seed, instead of drawing fresh, uncontrollable hardware
     // entropy (std::random_device) on every run. Each DRAMInterface draws
     // its own distinct-but-deterministic sub-seed from random_mt.
-    generator.seed(random_mt.random<uint64_t>());
+    const uint64_t root_seed = random_mt.random<uint64_t>();
+    generator.seed(root_seed);
 
     // Salt for the temperature model's per-cell W0/canary assignment.
-    // Drawn from the same seeded global RNG so the assignment is
-    // reproducible per seed, but it is independent of the temperature
-    // parameter -- so sweeping temperature at a fixed seed studies the
-    // SAME chip (same W0 and canary cells) at different temperatures.
-    tempSeedSalt = random_mt.random<uint64_t>();
+    // DERIVED from root_seed rather than drawn from random_mt, so that
+    // enabling this model consumes no additional draw from the global
+    // RNG. That matters because random_mt is SHARED -- the traffic
+    // generators draw their access patterns from it too, so an extra
+    // draw here would shift their stream and silently change the
+    // simulated workload (and hence results) for every configuration,
+    // even ones with the temperature model disabled.
+    //
+    // The salt is still seed-dependent and reproducible, and it is
+    // independent of the temperature parameter, so sweeping temperature
+    // at a fixed seed studies the SAME chip (same W0 and canary cells)
+    // at different temperatures. Mixing uses the splitmix64 finalizer.
+    uint64_t s = root_seed + 0x9E3779B97F4A7C15ULL;
+    s = (s ^ (s >> 30)) * 0xBF58476D1CE4E5B9ULL;
+    s = (s ^ (s >> 27)) * 0x94D049BB133111EBULL;
+    tempSeedSalt = s ^ (s >> 31);
 
     fatal_if(!isPowerOf2(burstSize), "DRAM burst size %d is not allowed, "
              "must be a power of two\n", burstSize);
