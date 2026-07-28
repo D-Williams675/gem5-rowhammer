@@ -249,11 +249,15 @@ class DRAMInterface(MemInterface):
     # Index 0 is distance 1 (immediately adjacent row), index 1 distance 2,
     # and so on. Must have at least blast_radius entries, each in [0, 1].
     #
-    # Index 0 (distance 1) is kept at 1.0 because distance-1 victims have
-    # their own already-calibrated path (single_sided_prob /
-    # double_sided_prob); applying a decay there too would double-count
-    # it. Indices 1+ shape the proximity-induced victims at distances
-    # 2..blast_radius, and decrease monotonically with distance.
+    # These factors apply ONLY to the proximity model in
+    # checkBlastRadiusVictims(), i.e. distances 2..blast_radius. The
+    # pre-existing distance-1 (single/double-sided) and distance-2
+    # (half-double) paths are deliberately NOT scaled by them: those
+    # paths carry their own calibrated probability gates, so applying a
+    # factor there too would double-modulate them -- and would silently
+    # disable half-double entirely whenever blast_radius < 2, since the
+    # factor for an out-of-range distance is 0. Index 0 (distance 1) is
+    # therefore unused in practice and kept at 1.0 for clarity.
     #
     # The defaults are the "blast impact factor" (c_k) from Yaglikci et al.,
     # "BlockHammer" (HPCA 2021), Section 6: c_k = 0.5^(k-1) with a blast

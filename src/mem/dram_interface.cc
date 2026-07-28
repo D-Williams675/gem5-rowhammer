@@ -237,8 +237,7 @@ DRAMInterface::checkRowHammer(Bank& bank_ref, MemPacket* mem_pkt)
             // column an equal chance regardless of how weak it
             // actually was.
             uint16_t col;
-            if (!selectVictimColumn(bank_ref, mem_pkt->row - 2, col,
-                                    blastRadiusFactor(2))) {
+            if (!selectVictimColumn(bank_ref, mem_pkt->row - 2, col)) {
                 bitflip = false;
             }
 
@@ -309,8 +308,7 @@ DRAMInterface::checkRowHammer(Bank& bank_ref, MemPacket* mem_pkt)
             // Parameterized weak-row/weak-cell probability model
             // (see DRAMInterface::selectVictimColumn).
             uint16_t col;
-            if (!selectVictimColumn(bank_ref, mem_pkt->row + 2, col,
-                                    blastRadiusFactor(2))) {
+            if (!selectVictimColumn(bank_ref, mem_pkt->row + 2, col)) {
                 bitflip = false;
             }
 
@@ -432,8 +430,7 @@ DRAMInterface::checkRowHammer(Bank& bank_ref, MemPacket* mem_pkt)
         if (mem_pkt->row > 0) {
             // Parameterized weak-row/weak-cell probability model
             // (see DRAMInterface::selectVictimColumn).
-            if (!selectVictimColumn(bank_ref, mem_pkt->row - 1, col,
-                                    blastRadiusFactor(1))) {
+            if (!selectVictimColumn(bank_ref, mem_pkt->row - 1, col)) {
                 bitflip_status = false;
             }
 
@@ -578,8 +575,7 @@ DRAMInterface::checkRowHammer(Bank& bank_ref, MemPacket* mem_pkt)
         if (mem_pkt->row < rowsPerBank - 2) {
             // Parameterized weak-row/weak-cell probability model
             // (see DRAMInterface::selectVictimColumn).
-            if (!selectVictimColumn(bank_ref, mem_pkt->row + 1, col,
-                                    blastRadiusFactor(1))) {
+            if (!selectVictimColumn(bank_ref, mem_pkt->row + 1, col)) {
                 bitflip_status = false;
             }
 
@@ -1025,10 +1021,24 @@ DRAMInterface::logBucketFlip(Bank& bank_ref, uint32_t row, uint16_t col)
     else if (prob >= weakBucketP2) category = "Y";
     else if (prob >= weakBucketP1) category = "Z";
     else category = "P";
+
+    // Report weakness the same way getCellFlipProbability decided it, so
+    // the logged field matches the model actually in use.
+    //
+    // This must stay SIDE-EFFECT FREE: isRowWeak() lazily assigns a row's
+    // weakness by drawing from `generator`, so calling it here for a row
+    // that the model itself never queried would consume an RNG draw and
+    // shift the stream -- meaning results would differ depending on
+    // whether this debug flag was enabled. isCellTemperatureWeak() is
+    // const and draws nothing; in the non-temperature case
+    // getCellFlipProbability() has already populated rowWeakness for this
+    // row, so isRowWeak() is a pure cache hit.
+    const bool weak = enableTemperatureModel
+                          ? isCellTemperatureWeak(row, col)
+                          : isRowWeak(bank_ref, row);
     DPRINTF(RhBucket,
         "Bucket flip bank %d row %d col %d weak %d prob %f bucket %s\n",
-        bank_ref.bank, row, col,
-        isRowWeak(bank_ref, row) ? 1 : 0, prob, category);
+        bank_ref.bank, row, col, weak ? 1 : 0, prob, category);
 }
 
 void
