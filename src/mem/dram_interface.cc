@@ -943,6 +943,24 @@ DRAMInterface::checkBlastRadiusVictims(Bank& bank_ref, MemPacket* mem_pkt,
     // at distance 2 would see far fewer flips than rows at distance 3,
     // which is physically backwards. Ordinary proximity-induced flips
     // at distance 2 therefore come from this path.
+    //
+    // KNOWN MODELING ASYMMETRY: this path applies NO attack-pattern
+    // logic. checkRowHammer decides distance-1 victims by attack type
+    // (a double-sided pattern enables them outright; a single-sided one
+    // is made astronomically rare via single_sided_prob), so for a
+    // double-sided attack on rows r-1/r+1 only the sandwiched row
+    // actually flips at distance 1. This path instead flips every row
+    // at distance d on both sides regardless of pattern. That is
+    // faithful to BlockHammer, whose c_k is purely distance-based, but
+    // it does mean attack-type reasoning applies at distance 1 and not
+    // beyond. Revisit if N-sided pattern gating should extend outward.
+    //
+    // CAUTION when analyzing output: raw flip totals are NOT comparable
+    // across distances, because the number of (aggressor, victim) pairs
+    // differs. For the standard 2-aggressor config, distance 1 resolves
+    // to a single victim row fed by BOTH aggressors, while each larger
+    // distance reaches four distinct rows fed by one aggressor each.
+    // Normalize per aggressor-victim pair before comparing to c_k.
     for (int d = 2; d <= blastRadius; d++) {
         const double factor = blastRadiusFactor(d);
         if (factor <= 0.0)
