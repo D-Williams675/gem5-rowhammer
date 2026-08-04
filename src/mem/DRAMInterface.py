@@ -282,6 +282,53 @@ class DRAMInterface(MemInterface):
     )
 
     # ------------------------------------------------------------------
+    # Hardware aging (wear-out) model.
+    #
+    # DRAM does not stay as reliable as it was on day one. Over years of
+    # operation, mechanisms such as bias-temperature instability, hot
+    # carrier injection, and time-dependent dielectric breakdown
+    # gradually degrade access transistors and increase cell leakage, so
+    # cells that comfortably held charge when the part was new slowly
+    # drift toward being RowHammer-vulnerable.
+    #
+    # Modeled simply, as agreed: let W0 be the cells that are weak at
+    # t = 0. At time t the weak set is W0 + W(t), where
+    #
+    #     |W(t)| = aging_rate * t(weeks) * (total cells in the bank)
+    #
+    # so aging_rate is just the fraction of the bank that wears out per
+    # week. W(t) cells are spread randomly across the bank, and aging is
+    # CUMULATIVE: a cell that has worn out by week t stays worn out at
+    # every later time, so W(t1) is a subset of W(t2) whenever t1 < t2.
+    #
+    # Cells in W(t) become weak in exactly the same sense as W0 cells --
+    # they draw their per-cell flip probability from the weak buckets
+    # rather than the non-weak ones.
+    # ------------------------------------------------------------------
+    enable_aging_model = Param.Bool(
+        False,
+        "Enable the hardware aging (wear-out) model, which makes an "
+        "additional aging_rate * age_weeks fraction of the bank's cells "
+        "weak on top of the cells that are weak at t = 0."
+    )
+
+    # Fraction of the bank's cells that wear out per week. Kept very
+    # small so that only a tiny fraction degrades over realistic
+    # lifetimes: at 1e-5/week, ten years (520 weeks) wears out ~0.5% of
+    # the bank.
+    aging_rate = Param.Float(
+        1e-5,
+        "Fraction of the bank's cells that become weak per week of "
+        "operation."
+    )
+
+    # Age of the part, in weeks. 0 = brand new (aging contributes
+    # nothing). Sweep this to study vulnerability over a part's life.
+    age_weeks = Param.Float(
+        0.0, "Age of the DRAM part in weeks (t in the aging model)."
+    )
+
+    # ------------------------------------------------------------------
     # Temperature-dependent weak-cell model.
     #
     # Models the behavior characterized in Orosa et al., "SpyHammer:

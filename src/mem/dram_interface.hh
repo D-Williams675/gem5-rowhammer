@@ -613,6 +613,18 @@ class DRAMInterface : public MemInterface
     // W0/canary assignment reproducible and controllable by the
     // simulation seed, without changing across a temperature sweep.
     // --------------------------------------------------------------
+    // --------------------------------------------------------------
+    // Hardware aging (wear-out) model. See DRAMInterface.py and
+    // isCellAged(). agingSalt keeps the per-cell wear-out assignment
+    // reproducible per seed and independent of the temperature model's
+    // assignment, and is derived (not drawn) so enabling aging does not
+    // perturb the shared global RNG.
+    // --------------------------------------------------------------
+    const bool enableAgingModel;
+    const double agingRate;
+    const double ageWeeks;
+    uint64_t agingSalt;
+
     const bool enableTemperatureModel;
     const int temperature;
     const int tempMin;
@@ -755,6 +767,16 @@ class DRAMInterface : public MemInterface
      * the temperature is swept -- only which range is "active" changes.
      */
     bool isCellTemperatureWeak(uint32_t row, uint16_t col) const;
+
+    /**
+     * Hardware aging: returns whether cell (row, col) has worn out by the
+     * configured age. A deterministic fraction (aging_rate * age_weeks)
+     * of the bank's cells, spread randomly, is worn out at any given
+     * age; because the test is a fixed per-cell threshold against a
+     * monotonically growing fraction, the worn-out set only ever grows
+     * with age. Const and side-effect free -- draws no randomness.
+     */
+    bool isCellAged(uint32_t row, uint16_t col) const;
 
     /**
      * Draws a single flip-probability value from the weak-row bucket

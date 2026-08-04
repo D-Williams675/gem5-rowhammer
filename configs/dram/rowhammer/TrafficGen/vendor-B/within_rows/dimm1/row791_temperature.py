@@ -81,6 +81,12 @@ parser.add_argument("--blast-radius", type=int, default=1,
 parser.add_argument("--blast-factors", type=str, default=None,
                     help="Comma-separated per-distance flip-probability "
                          "multipliers, e.g. '1,1,0.05,0.01,0.002'.")
+parser.add_argument("--aging-rate", type=float, default=1e-5,
+                    help="Fraction of bank cells worn out per week "
+                         "(default: 1e-5).")
+parser.add_argument("--age-weeks", type=float, default=0.0,
+                    help="Age of the DRAM part in weeks; 0 = brand new "
+                         "(default: 0). Non-zero enables the aging model.")
 parser.add_argument("--canary-percent", type=float, default=2.0,
                     help="%% of canary cells weak at exactly one temperature "
                          "range (default: 2).")
@@ -154,6 +160,12 @@ class DRAM_TEST(DDR4_2400_8x8):
     temp_range_size = args.temp_range_size
     w0_percent = args.w0_percent
     canary_percent = args.canary_percent
+    # Hardware aging: weak set at time t is W0 + W(t), where
+    # |W(t)| = aging_rate * t(weeks) * total cells in the bank.
+    # Enabled only when a non-zero age is requested.
+    enable_aging_model = args.age_weeks > 0
+    aging_rate = args.aging_rate
+    age_weeks = args.age_weeks
     # Blast radius: how far from the aggressor row flips can occur, and
     # the per-distance flip-probability multipliers.
     blast_radius = args.blast_radius

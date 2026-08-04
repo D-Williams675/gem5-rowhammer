@@ -729,6 +729,28 @@ DRAMInterface::isCellTemperatureWeak(uint32_t row, uint16_t col) const
     return cell_range == cur_range;
 }
 
+bool
+DRAMInterface::isCellAged(uint32_t row, uint16_t col) const
+{
+    // Fraction of the bank worn out by now: aging_rate * t(weeks). This
+    // is |W(t)| / (total cells in bank), since
+    // |W(t)| = aging_rate * t * total_cells.
+    const double aged_fraction = agingRate * ageWeeks;
+    if (aged_fraction <= 0.0)
+        return false;
+
+    // Deterministic per-cell value in [0, 1), fixed for a given
+    // (row, col) and seed, and independent of the temperature model's
+    // assignment because a different salt is mixed in. The cell has worn
+    // out once the aged fraction has grown past its threshold, so the
+    // worn-out set grows monotonically with age and never shrinks --
+    // W(t1) is a subset of W(t2) for t1 < t2, as wear-out should be.
+    const uint64_t key = (static_cast<uint64_t>(row) * 0xC2B2AE3D27D4EB4FULL)
+                         ^ (static_cast<uint64_t>(col) * 0x165667B19E3779F9ULL)
+                         ^ agingSalt;
+    return hashToUnit(key) < aged_fraction;
+}
+
 double
 DRAMInterface::sampleBucketedProbability(bool weak)
 {
@@ -799,6 +821,14 @@ DRAMInterface::getCellFlipProbability(Bank& bank_ref, uint32_t row,
     bool weak = enableTemperatureModel
                     ? isCellTemperatureWeak(row, col)
                     : isRowWeak(bank_ref, row);
+
+    // Hardware aging adds to whatever was already weak: the weak set at
+    // time t is W0 + W(t). A cell that has worn out counts as weak even
+    // if it was fine when the part was new, so this is a union, never a
+    // replacement.
+    if (!weak && enableAgingModel && isCellAged(row, col))
+        weak = true;
+
     double prob = sampleBucketedProbability(weak);
     bank_ref.cellFlipProb[row][col] = prob;
     return prob;
@@ -2651,6 +2681,9 @@ DRAMInterface::DRAMInterface(const DRAMInterfaceParams &_p)
       blastRadius(_p.blast_radius),
       blastRadiusFactors(_p.blast_radius_factors.begin(),
                          _p.blast_radius_factors.end()),
+      enableAgingModel(_p.enable_aging_model),
+      agingRate(_p.aging_rate),
+      ageWeeks(_p.age_weeks),
       enableTemperatureModel(_p.enable_temperature_model),
       temperature(_p.temperature),
       tempMin(_p.temp_min),
@@ -2698,6 +2731,16 @@ DRAMInterface::DRAMInterface(const DRAMInterfaceParams &_p)
     s = (s ^ (s >> 30)) * 0xBF58476D1CE4E5B9ULL;
     s = (s ^ (s >> 27)) * 0x94D049BB133111EBULL;
     tempSeedSalt = s ^ (s >> 31);
+
+    // Salt for the aging model's per-cell wear-out assignment. Derived
+    // from tempSeedSalt (again, no extra global RNG draw -- see above)
+    // and mixed once more so the aging and temperature assignments are
+    // statistically independent: a cell being a canary must not make it
+    // any more or less likely to be one that wears out.
+    uint64_t a = tempSeedSalt + 0x9E3779B97F4A7C15ULL;
+    a = (a ^ (a >> 30)) * 0xBF58476D1CE4E5B9ULL;
+    a = (a ^ (a >> 27)) * 0x94D049BB133111EBULL;
+    agingSalt = a ^ (a >> 31);
 
     fatal_if(!isPowerOf2(burstSize), "DRAM burst size %d is not allowed, "
              "must be a power of two\n", burstSize);
@@ -2760,6 +2803,22 @@ DRAMInterface::DRAMInterface(const DRAMInterfaceParams &_p)
         fatal_if(blastRadiusFactors[d] < 0.0 || blastRadiusFactors[d] > 1.0,
                  "blast_radius_factors[%d] = %f must be in [0, 1]\n",
                  d, blastRadiusFactors[d]);
+    }
+
+    // Validate the hardware aging model parameters.
+    if (enableAgingModel) {
+        fatal_if(agingRate < 0.0,
+                 "aging_rate must be non-negative, got %f\n", agingRate);
+        fatal_if(ageWeeks < 0.0,
+                 "age_weeks must be non-negative, got %f\n", ageWeeks);
+        // aging_rate * age_weeks is a fraction of the bank, so it cannot
+        // exceed 1. Exceeding it means the configured rate wears out
+        // more cells than the bank has, which is certainly a mistake.
+        const double aged_fraction = agingRate * ageWeeks;
+        fatal_if(aged_fraction > 1.0,
+                 "aging_rate (%g) * age_weeks (%g) = %g exceeds 1.0, i.e. "
+                 "more than the whole bank would have worn out; lower the "
+                 "rate or the age\n", agingRate, ageWeeks, aged_fraction);
     }
 
     // Validate the temperature-dependent weak-cell model parameters.
