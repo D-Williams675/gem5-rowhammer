@@ -363,6 +363,16 @@ DRAMInterface::checkRowHammer(Bank& bank_ref, MemPacket* mem_pkt)
             if (bank_ref.aggressor_rows[mem_pkt->row]>=rowhammerThreshold/2 &&
                 bank_ref.aggressor_rows[mem_pkt->row-2]>=rowhammerThreshold/2){
                     single_sided = false;
+                    // NOTE: bitflip_status is set true here, BEFORE the
+                    // double_sided_prob roll below. That roll only ever sets
+                    // the flag true (never false), so double_sided_prob and
+                    // its modulo throttle do NOT gate double-sided flips --
+                    // the weak-cell model (selectVictimColumn) is the sole
+                    // gate. This is intentional for the synthetic model, whose
+                    // probability source is the weak-cell buckets; the
+                    // double_sided_prob parameter is currently inert. Do not
+                    // "wire it up" without regenerating all double-sided
+                    // results (the dead rolls still consume RNG draws).
                     bitflip_status = true;
 
             }
@@ -519,6 +529,9 @@ DRAMInterface::checkRowHammer(Bank& bank_ref, MemPacket* mem_pkt)
                     bank_ref.aggressor_rows[mem_pkt->row + 2] >=
                     rowhammerThreshold/2) {
                 single_sided = false;
+                // See the note in the row-1 victim block above: double-sided
+                // flips are gated only by the weak-cell model, not by
+                // double_sided_prob (which is currently inert).
                 bitflip_status = true;
             }
         }
@@ -1165,21 +1178,15 @@ DRAMInterface::doMemoryCorruption(MemPacket* mem_pkt, uint8_t bank,
     uint8_t *dest = new uint8_t[row_size];
     std::memcpy(dest, host_addr, row_size);
     
-    // if the user wants to enable ECC, we need to keep a track of the original
-    // data to that the ECC bits can be calculated
-    if (enableEcc) {
-        // check if this address (row aligned) exists in the tracker.
-        if (auto search = ecc_victims.find(addr);
-                search != ecc_victims.end()) {}
-        else {
-            // there is a first time corruption here. so keep this row tracked
-            // until this row is read. keep the entire row data
-            ecc_victims[addr] = dest;
-            ecc_columns[addr] = col;
-            DPRINTF(ECC, "Entry for %#x created with the original, col %d!\n",
-                addr, col);
-        }
-    }
+    // ECC victim tracking is intentionally disabled here. The previous code
+    // stored the working buffer `dest` into ecc_victims and then delete[]-ed
+    // it below, leaving a dangling pointer in the map (use-after-free); the
+    // read side also keyed its lookup on a different address, so it never
+    // matched the real victim anyway. Functional SECDED correction is not yet
+    // implemented, so nothing is tracked. Keeping ecc_victims empty also makes
+    // the read-side ECC branch unreachable, so it cannot crash or over-read.
+    // When SECDED lands it must store an owned copy of the ORIGINAL
+    // (pre-corruption) word keyed on the victim's own address.
 
     // the bit to corrupt needs to be selected randomly! Let's just use an
     // existing distribution to generate this bit. There are 8 capacitors
@@ -2345,10 +2352,18 @@ DRAMInterface::doBurstAccess(MemPacket* mem_pkt, Tick next_burst_at,
                                 uint8_t *dest = new uint8_t[row_size];
                                 std::memcpy(dest, host_addr, row_size);
 
-                                assert(false &&
-                                    "This feature is not fully"
-                                    " implemented yet\n");
-
+                                // Functional SECDED correction is not yet
+                                // implemented. This branch is currently
+                                // unreachable (ecc_victims is never populated;
+                                // see doMemoryCorruption), so the warning is
+                                // defensive in case victim tracking is
+                                // re-enabled before correction lands. The
+                                // former assert(false) here aborted the whole
+                                // simulation.
+                                warn_once("HammerSim ECC is enabled but "
+                                    "correction is not implemented yet; "
+                                    "enable_ecc is currently a no-op.\n");
+                                delete[] dest;
                                 break;
                             }
                         default: fatal("unknown ECC algorithm!\n");
