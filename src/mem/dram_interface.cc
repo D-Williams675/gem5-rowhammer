@@ -1087,9 +1087,17 @@ DRAMInterface::logBucketFlip(Bank& bank_ref, uint32_t row, uint16_t col)
     // const and draws nothing; in the non-temperature case
     // getCellFlipProbability() has already populated rowWeakness for this
     // row, so isRowWeak() is a pure cache hit.
-    const bool weak = enableTemperatureModel
-                          ? isCellTemperatureWeak(row, col)
-                          : isRowWeak(bank_ref, row);
+    bool weak = enableTemperatureModel
+                    ? isCellTemperatureWeak(row, col)
+                    : isRowWeak(bank_ref, row);
+    // Aging can turn an otherwise-non-weak cell weak (see
+    // getCellFlipProbability, which ORs in isCellAged). Reflect that here
+    // so the logged `weak` field matches the model actually in use;
+    // otherwise aged flips are mislabeled weak 0 while carrying
+    // weak-bucket probabilities. isCellAged() is const and draws no RNG,
+    // so this stays side-effect free.
+    if (!weak && enableAgingModel && isCellAged(row, col))
+        weak = true;
     DPRINTF(RhBucket,
         "Bucket flip bank %d row %d col %d weak %d prob %f bucket %s\n",
         bank_ref.bank, row, col, weak ? 1 : 0, prob, category);
@@ -2846,6 +2854,20 @@ DRAMInterface::DRAMInterface(const DRAMInterfaceParams &_p)
                  w0Percent, n_ranges, canaryPercent, used);
     }
 
+    // TRR table sizes below 2 underflow the companion-table promotion
+    // logic (companion_entries < companionTableLength - 1) and index the
+    // counter table out of bounds, which crashes the simulator with a
+    // SIGSEGV. Turn that into a clear error for any variant that uses the
+    // tables (everything except 0 = off and 5 = PARA, which keep none).
+    if (trrVariant != 0 && trrVariant != 5) {
+        fatal_if(counterTableLength < 2,
+                 "counter_table_length (%d) must be >= 2 for TRR variant "
+                 "%d\n", counterTableLength, trrVariant);
+        fatal_if(companionTableLength < 2,
+                 "companion_table_length (%d) must be >= 2 for TRR variant "
+                 "%d\n", companionTableLength, trrVariant);
+    }
+
     for (int i = 0; i < ranksPerChannel; i++) {
         DPRINTF(DRAM, "Creating DRAM rank %d \n", i);
         Rank* rank = new Rank(_p, i, *this);
@@ -4089,6 +4111,7 @@ DRAMInterface::Rank::processRefreshEvent()
                     }
                     break;
                 case 2:
+                case 3:
                 case 5:
                 case 6:
                     // there must be no cross variable initialziations.
@@ -4107,8 +4130,6 @@ DRAMInterface::Rank::processRefreshEvent()
                             }
                         }
                     }
-                    break;
-                case 3:
                     break;
                 default:
                     fatal("Unknown TRR Variant detected!");
