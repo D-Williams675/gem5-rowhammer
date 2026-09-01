@@ -4026,9 +4026,20 @@ DRAMInterface::Rank::processRefreshEvent()
                     break;
                 case 1:
                 case 4:
-                    // there must be no cross variable initialziations.
-                    if (dram.refreshCounter % 4096 == 0) {
-                        DPRINTF(RhInhibitor, "All rows refreshed!\n");
+                    // Normal refresh (tREFW) resets accumulated disturbance,
+                    // exactly like the baseline (case 0) does at %8192. This
+                    // used to fire at %4096 -- twice as often as baseline --
+                    // which suppressed flips by itself and MASKED the real TRR
+                    // mechanism (the tracking-driven targeted victim refresh
+                    // earlier in this function, gated by trr_threshold). With
+                    // the cadence now matched to baseline, variant 1/4's
+                    // mitigation comes only from that targeted refresh, so TRR
+                    // genuinely depends on sampling the aggressors -- a
+                    // many-sided attack that overflows the table, or a
+                    // trr_threshold set above the achievable count, is no
+                    // longer suppressed.
+                    if (dram.refreshCounter % 8192 == 0) {
+                        DPRINTF(RhInhibitor, "Normal refresh reset\n");
 
                         for (auto &b : banks) {
                             for (int i = 0 ; i < dram.counterTableLength;
