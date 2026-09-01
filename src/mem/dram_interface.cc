@@ -1193,7 +1193,25 @@ DRAMInterface::doMemoryCorruption(MemPacket* mem_pkt, uint8_t bank,
     // per column in 8x8 dimm
     uint64_t corrupt_bit = hd_distribution(generator) % 8;
     dest[col] ^= (1 << corrupt_bit);
-    
+
+    // Functional SECDED tracking: record the exact host bit just flipped,
+    // grouped into its 64-bit word and keyed on the host address of that word
+    // -- the actual memory location that changed, which avoids the
+    // controller/system address reconstruction that made the old read-side
+    // lookup miss. A later read of this word (see doBurstAccess) corrects a
+    // single-bit error or detects a multi-bit one. XOR so that flipping the
+    // same bit back to its original value clears it from the error set.
+    if (enableEcc && eccAlgorithm == 1) {
+        const uintptr_t hbyte =
+            reinterpret_cast<uintptr_t>(host_addr) + col;
+        const uintptr_t hword = hbyte & ~uintptr_t(7);
+        const unsigned bitpos =
+            static_cast<unsigned>((hbyte - hword) * 8) + corrupt_bit;
+        ecc_word_flips[hword] ^= (uint64_t(1) << bitpos);
+        DPRINTF(ECC, "ECC track: corrupted bit %u of host word %#lx\n",
+                bitpos, (unsigned long) hword);
+    }
+
     // increment the stat to make sure that the right bit has flipped
     stats.rowHammerCorruptedBitCount++;
 
@@ -2252,122 +2270,57 @@ DRAMInterface::doBurstAccess(MemPacket* mem_pkt, Tick next_burst_at,
 
         // Okay, even though ECC is functionally implemented, ECC only corrects
         // when the DRAM does a READ.
-        if (enableEcc) {
-            if (mem_pkt->isRead()) {
-                // check if this is a victim row and any of its bits are
-                // corrupted.
-                // Align the address with the start of the row to lookup the
-                // map
-                // TODO
-
-                // here is the correct version of the addresses
-                const Addr ctrl_off  = getCtrlAddr(mem_pkt->addr);
-
-                // One DRAM row/page in bytes for this interface.
-                const Addr row_bytes = 
-                                banksPerRank * burstsPerRowBuffer * burstSize;
-
-                // Move to row+1 while keeping column offset as-is (same
-                // column).
-                const Addr next_ctrl = ctrl_off + row_bytes;
-
-                // To make sure that we're causing bitflips at the right
-                // places, add an assert that the row is calculated correctly.
-                // it needs to be correctly implemented
-                Addr addr = range.start() + next_ctrl;
-                
-                // Back to system physical address.
-                // Addr addr = range.start() + next_ctrl;
-                if (auto search = ecc_victims.find(addr);
-                                   search != ecc_victims.end()) {
-                    DPRINTF(ECC, "Entry for %#x found with column %d\n",
-                                    addr, search->second);
-                    switch (eccAlgorithm) {
-                        case 0: break;
-                        case 1: {
-                                // SECDED
-                                // For every 64 bits, there are 8 bits of ECC
-                                // calculate the ECC bits from the original
-                                // data
-                                // step 1: calculate the ECC bits from the
-                                // original data
-                                // make sure that the modified data 64 bits
-                                // aligned
-                                uint16_t start_col = ecc_columns[addr] / 8;
-                                // get a 8 byte aligned word
-                                uint8_t *original_row_data = ecc_victims[addr];
-                                
-                                // 8-byte chunk start
-                                const uint8_t* d =
-                                                original_row_data + start_col;
-                                uint8_t ecc = 0;
-
-                                
-                                // For each ECC bit (column j in P)
-                                    for (std::size_t j = 0; j < 8; ++j) {
-                                        uint8_t parity = 0;
-
-                                        // XOR over all 64 data bits with
-                                        // P[i,j]
-                                        for (std::size_t i = 0; i < 64; ++i) {
-                                            // Extract data bit i
-                                            // (MSB-first within each byte)
-                                            const std::size_t byteIdx = i / 8;
-                                            const int bitPos =
-                                                7 - static_cast<int>(i % 8);
-                                            const uint8_t di =
-                                                static_cast<uint8_t>(
-                                                    (*(d + byteIdx) >> bitPos)
-                                                    & 0x1 );
-
-                                            // Take LSB of P entry as the
-                                            // matrix bit
-                                            const uint8_t pij =
-                                                static_cast<uint8_t>(
-                                                *(pMatrix + i * 8 + j) & 0x1);
-
-                                            parity ^= (di & pij);
-                                            // GF(2): XOR of ANDs
-                                        }
-
-                                        // Pack ECC bits MSB-first into the
-                                        // result byte
-                                        if (parity & 0x1) {
-                                            ecc |= static_cast<uint8_t>(
-                                                1u << (7 - j));
-                                        }
-                                    }
-                                    // the ecc bits are stored as ecc
-                                    DPRINTF(ECC, "ECC bits %d\n", ecc);
-
-
-
-                                // now get the exact data from the start_col
-
-                                // step 2: get the corrupted data data
-                                uint8_t *host_addr = toHostAddr(addr);
-                                assert(host_addr);
-                               
-                                uint64_t row_size = rowBufferSize;
-                                uint8_t *dest = new uint8_t[row_size];
-                                std::memcpy(dest, host_addr, row_size);
-
-                                // Functional SECDED correction is not yet
-                                // implemented. This branch is currently
-                                // unreachable (ecc_victims is never populated;
-                                // see doMemoryCorruption), so the warning is
-                                // defensive in case victim tracking is
-                                // re-enabled before correction lands. The
-                                // former assert(false) here aborted the whole
-                                // simulation.
-                                warn_once("HammerSim ECC is enabled but "
-                                    "correction is not implemented yet; "
-                                    "enable_ecc is currently a no-op.\n");
-                                delete[] dest;
-                                break;
-                            }
-                        default: fatal("unknown ECC algorithm!\n");
+        if (enableEcc && eccAlgorithm == 1 && mem_pkt->isRead()) {
+            // Functional SECDED on read. RowHammer records every corrupted bit
+            // in ecc_word_flips (see doMemoryCorruption), grouped into the
+            // 64-bit word that contains it and keyed on the host address of
+            // that word. Walk the words this burst covers: a word with a
+            // single corrupted bit is corrected (the flipped bit is restored
+            // in host memory, mirroring what a real SECDED code returns to the
+            // CPU) and counted; a word with two or more corrupted bits is
+            // detected but left uncorrectable, as SECDED cannot repair it.
+            // Anchor the read in the SAME address space doMemoryCorruption
+            // used: it keys the flipped word on
+            // toHostAddr(range.start() + getCtrlAddr(aggressor) +
+            // distance*row_bytes), and getCtrlAddr(victim_read) equals
+            // getCtrlAddr(aggressor) + distance*row_bytes. getCtrlAddr is
+            // linear in the low (column) bits, so this reconstructs the exact
+            // host word that was corrupted. Using the raw packet address here
+            // instead would never match.
+            uint8_t *rbase =
+                toHostAddr(range.start() + getCtrlAddr(mem_pkt->addr));
+            if (rbase) {
+                for (unsigned off = 0; off < burstSize; off += 8) {
+                    const uintptr_t hword =
+                        reinterpret_cast<uintptr_t>(rbase + off)
+                        & ~uintptr_t(7);
+                    auto it = ecc_word_flips.find(hword);
+                    if (it == ecc_word_flips.end())
+                        continue;
+                    const uint64_t mask = it->second;
+                    if (mask == 0) {
+                        ecc_word_flips.erase(it);
+                        continue;
                     }
+                    const int nerr = __builtin_popcountll(mask);
+                    if (nerr == 1) {
+                        // single-bit error: SECDED corrects it in place
+                        const int bitpos = __builtin_ctzll(mask);
+                        uint8_t *b = reinterpret_cast<uint8_t *>(hword)
+                                     + (bitpos / 8);
+                        *b ^= static_cast<uint8_t>(1u << (bitpos % 8));
+                        stats.rowHammerEccCorrected++;
+                        DPRINTF(ECC, "SECDED corrected 1-bit error at host "
+                                "word %#lx (bit %d)\n",
+                                (unsigned long) hword, bitpos);
+                    } else {
+                        // two or more bits: detected, uncorrectable
+                        stats.rowHammerEccDetected++;
+                        DPRINTF(ECC, "SECDED detected %d-bit error at host "
+                                "word %#lx (uncorrectable)\n", nerr,
+                                (unsigned long) hword);
+                    }
+                    ecc_word_flips.erase(it);
                 }
             }
         }
@@ -2944,8 +2897,10 @@ DRAMInterface::DRAMInterface(const DRAMInterfaceParams &_p)
 
     DPRINTF(RowHammer, "Initialized device map successfully!\n");
 
-    // if the user wants to simulate ecc, then load the pMatrix file
-    if (enableEcc) {
+    // Optionally load a pMatrix file if one was supplied. The functional
+    // SECDED implementation no longer needs it (it tracks flipped bits
+    // directly in ecc_word_flips), so a missing pMatrix is not an error.
+    if (enableEcc && pMatrixFileName != "NULL") {
         std::ifstream pm(pMatrixFileName, std::ios::binary);
         if (!pm) {
             fatal("The given pMatrix file not found!\n");

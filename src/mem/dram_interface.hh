@@ -652,6 +652,12 @@ class DRAMInterface : public MemInterface
     std::unordered_map<gem5::Addr, uint8_t*> ecc_victims;
     std::unordered_map<gem5::Addr, uint16_t> ecc_columns;
 
+    // Functional SECDED bit tracking. Maps a 64-bit word (keyed on the host
+    // address of the word) to a mask of the bits RowHammer has flipped in it.
+    // Populated in doMemoryCorruption; consumed on read in doBurstAccess,
+    // where a single-bit error is corrected and a multi-bit one is detected.
+    std::unordered_map<uintptr_t, uint64_t> ecc_word_flips;
+
     // We cannot use simple timing based seed and need a high quality random
     // distribution to simulate the uniform probabilities
     std::uniform_int_distribution<uint64_t> hd_distribution;
