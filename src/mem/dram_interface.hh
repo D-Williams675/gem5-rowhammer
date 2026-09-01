@@ -564,7 +564,9 @@ class DRAMInterface : public MemInterface
 
     const uint64_t singleSidedProb;
     const uint64_t halfDoubleProb;
-    const uint64_t doubleSidedProb;
+    // Probability [0,1] that a hammered weak victim flips on a double-sided
+    // attack (see checkRowHammer). Values >= 1 always pass the gate.
+    const double doubleSidedProb;
 
     const bool enableMemoryCorruption;
 
@@ -662,7 +664,8 @@ class DRAMInterface : public MemInterface
     // distribution to simulate the uniform probabilities
     std::uniform_int_distribution<uint64_t> hd_distribution;
     std::uniform_int_distribution<uint64_t> single_sided_distribution;
-    std::uniform_int_distribution<uint64_t> double_sided_distribution;
+    // double_sided_distribution removed: double-sided flips are now gated by
+    // the doubleSidedProb probability directly (see checkRowHammer).
     std::uniform_int_distribution<uint64_t> another_distribution;
 
 

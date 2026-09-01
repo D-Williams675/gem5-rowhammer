@@ -363,17 +363,9 @@ DRAMInterface::checkRowHammer(Bank& bank_ref, MemPacket* mem_pkt)
             if (bank_ref.aggressor_rows[mem_pkt->row]>=rowhammerThreshold/2 &&
                 bank_ref.aggressor_rows[mem_pkt->row-2]>=rowhammerThreshold/2){
                     single_sided = false;
-                    // NOTE: bitflip_status is set true here, BEFORE the
-                    // double_sided_prob roll below. That roll only ever sets
-                    // the flag true (never false), so double_sided_prob and
-                    // its modulo throttle do NOT gate double-sided flips --
-                    // the weak-cell model (selectVictimColumn) is the sole
-                    // gate. This is intentional for the synthetic model, whose
-                    // probability source is the weak-cell buckets; the
-                    // double_sided_prob parameter is currently inert. Do not
-                    // "wire it up" without regenerating all double-sided
-                    // results (the dead rolls still consume RNG draws).
-                    bitflip_status = true;
+                    // Do NOT pre-set bitflip_status here: the double-sided
+                    // flip is gated below by doubleSidedProb (the !single_sided
+                    // block). Pre-setting it is what made that gate a no-op.
 
             }
         }
@@ -415,24 +407,15 @@ DRAMInterface::checkRowHammer(Bank& bank_ref, MemPacket* mem_pkt)
 
             // srand((time.tv_sec * 1000) + (time.tv_usec / 1000));
 
-            // uint64_t prob = rand() % (doubleSidedProb * 10) + 1;
-            // ignore overflow. multiples equaling to 1 is very rare
-            uint64_t prob = double_sided_distribution(generator);
-
-
-            if (syntheticTraffic) {
-                // mix this distribution with another distribution to
-                // slow the bitflips as traffic generators do not capture
-                // the real life equivalent
-                prob *= ((another_distribution(generator) *
-                                        another_distribution(generator)));
-                // mkae sure that modulo is also zero
-                if ((bank_ref.rhTriggers[mem_pkt->row][1] %
-                                                rowhammerThreshold) != 0)
-                    prob = 0;
-            }
-            if (prob == 1)
-                // flip a bit!
+            // Gate the double-sided flip on doubleSidedProb: the probability
+            // [0,1] that a hammered weak victim flips on a double-sided
+            // attack. The weak-cell model (selectVictimColumn, below) still
+            // decides which cell is susceptible and its base probability;
+            // this is the double-sided event probability layered on top.
+            // doubleSidedProb >= 1 always passes (legacy behavior, in which
+            // the weak-cell model was the sole gate).
+            std::uniform_real_distribution<double> ds_gate(0.0, 1.0);
+            if (ds_gate(generator) < doubleSidedProb)
                 bitflip_status = true;
         }
 
@@ -529,10 +512,7 @@ DRAMInterface::checkRowHammer(Bank& bank_ref, MemPacket* mem_pkt)
                     bank_ref.aggressor_rows[mem_pkt->row + 2] >=
                     rowhammerThreshold/2) {
                 single_sided = false;
-                // See the note in the row-1 victim block above: double-sided
-                // flips are gated only by the weak-cell model, not by
-                // double_sided_prob (which is currently inert).
-                bitflip_status = true;
+                // Gated below by doubleSidedProb; do not pre-set here.
             }
         }
 
@@ -565,22 +545,11 @@ DRAMInterface::checkRowHammer(Bank& bank_ref, MemPacket* mem_pkt)
             // we need to flip a bit depending upon some probability
 
             // srand((time.tv_sec * 1000) + (time.tv_usec / 1000));
-            // uint64_t prob = rand() % (doubleSidedProb * 10) + 1;
-            uint64_t prob = double_sided_distribution(generator);
-
-            if (syntheticTraffic) {
-                // mix this distribution with another distribution to
-                // slow the bitflips as traffic generators do not capture
-                // the real life equivalent
-                prob *= (another_distribution(generator) *
-                            another_distribution(generator));
-                // mkae sure that modulo is also zero
-                if (bank_ref.rhTriggers[mem_pkt->row][2] % rowhammerThreshold
-                                                                        != 0)
-                    prob = 0;
-            }
-            if (prob == 1)
-                // flip a bit!
+            // Gate the double-sided flip on doubleSidedProb (see the matching
+            // block for the other victim side above). doubleSidedProb >= 1
+            // always passes (legacy behavior).
+            std::uniform_real_distribution<double> ds_gate(0.0, 1.0);
+            if (ds_gate(generator) < doubleSidedProb)
                 bitflip_status = true;
         }
 
@@ -2934,8 +2903,8 @@ DRAMInterface::DRAMInterface(const DRAMInterfaceParams &_p)
                 std::numeric_limits<std::uint64_t>::min(), halfDoubleProb);
     single_sided_distribution = std::uniform_int_distribution<uint64_t>(
                 std::numeric_limits<std::uint64_t>::min(), singleSidedProb);
-    double_sided_distribution = std::uniform_int_distribution<uint64_t>(
-                std::numeric_limits<std::uint64_t>::min(), doubleSidedProb);
+    // double_sided_distribution removed: doubleSidedProb is now a probability
+    // gate applied directly in checkRowHammer, not a distribution bound.
     another_distribution = std::uniform_int_distribution<uint64_t>(
                                     std::numeric_limits<std::uint64_t>::min(),
                                     std::numeric_limits<std::uint64_t>::max());

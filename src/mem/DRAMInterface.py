@@ -136,11 +136,14 @@ class DRAMInterface(MemInterface):
         "at least 1 single-sided bitflip.",
     )
 
-    double_sided_prob = Param.UInt64(
-        1e5,
-        "Number of double-sided RH "
-        "attacks required to flip at least "
-        "one bit in the sandwiched row.",
+    double_sided_prob = Param.Float(
+        1.0,
+        "Probability [0,1] that a hammered weak victim cell flips on a "
+        "double-sided RowHammer attack. The weak-cell model still decides "
+        "which cell is susceptible and its base probability; this gates the "
+        "double-sided event on top of it. Values >= 1 always pass the gate "
+        "(the legacy behavior, in which the weak-cell model was the sole "
+        "gate); lower values reduce double-sided flips proportionally.",
     )
 
     enable_memory_corruption = Param.Bool(
