@@ -2236,61 +2236,59 @@ DRAMInterface::doBurstAccess(MemPacket* mem_pkt, Tick next_burst_at,
         DPRINTF(DRAMAddr, "ACT: Addr %#x, rank %d bank %d row %d\n",
                     mem_pkt->addr, rank_ref.rank, bank_ref.bank, mem_pkt->row);
         activateBank(rank_ref, bank_ref, act_tick, mem_pkt->row);
+    }
 
-        // Okay, even though ECC is functionally implemented, ECC only corrects
-        // when the DRAM does a READ.
-        if (enableEcc && eccAlgorithm == 1 && mem_pkt->isRead()) {
-            // Functional SECDED on read. RowHammer records every corrupted bit
-            // in ecc_word_flips (see doMemoryCorruption), grouped into the
-            // 64-bit word that contains it and keyed on the host address of
-            // that word. Walk the words this burst covers: a word with a
-            // single corrupted bit is corrected (the flipped bit is restored
-            // in host memory, mirroring what a real SECDED code returns to the
-            // CPU) and counted; a word with two or more corrupted bits is
-            // detected but left uncorrectable, as SECDED cannot repair it.
-            // Anchor the read in the SAME address space doMemoryCorruption
-            // used: it keys the flipped word on
-            // toHostAddr(range.start() + getCtrlAddr(aggressor) +
-            // distance*row_bytes), and getCtrlAddr(victim_read) equals
-            // getCtrlAddr(aggressor) + distance*row_bytes. getCtrlAddr is
-            // linear in the low (column) bits, so this reconstructs the exact
-            // host word that was corrupted. Using the raw packet address here
-            // instead would never match.
-            uint8_t *rbase =
-                toHostAddr(range.start() + getCtrlAddr(mem_pkt->addr));
-            if (rbase) {
-                for (unsigned off = 0; off < burstSize; off += 8) {
-                    const uintptr_t hword =
-                        reinterpret_cast<uintptr_t>(rbase + off)
-                        & ~uintptr_t(7);
-                    auto it = ecc_word_flips.find(hword);
-                    if (it == ecc_word_flips.end())
-                        continue;
-                    const uint64_t mask = it->second;
-                    if (mask == 0) {
-                        ecc_word_flips.erase(it);
-                        continue;
-                    }
-                    const int nerr = __builtin_popcountll(mask);
-                    if (nerr == 1) {
-                        // single-bit error: SECDED corrects it in place
-                        const int bitpos = __builtin_ctzll(mask);
-                        uint8_t *b = reinterpret_cast<uint8_t *>(hword)
-                                     + (bitpos / 8);
-                        *b ^= static_cast<uint8_t>(1u << (bitpos % 8));
-                        stats.rowHammerEccCorrected++;
-                        DPRINTF(ECC, "SECDED corrected 1-bit error at host "
-                                "word %#lx (bit %d)\n",
-                                (unsigned long) hword, bitpos);
-                    } else {
-                        // two or more bits: detected, uncorrectable
-                        stats.rowHammerEccDetected++;
-                        DPRINTF(ECC, "SECDED detected %d-bit error at host "
-                                "word %#lx (uncorrectable)\n", nerr,
-                                (unsigned long) hword);
-                    }
+    // Functional SECDED on read. This must run on EVERY read burst, not only
+    // on the row-miss path above: a read that HITS the already-open row buffer
+    // still returns (possibly RowHammer-corrupted) data to the CPU and must be
+    // ECC-checked. RowHammer records every corrupted bit in ecc_word_flips
+    // (see doMemoryCorruption), grouped into the 64-bit word that contains it
+    // and keyed on the host address of that word. Walk the words this burst
+    // covers: a word with a single corrupted bit is corrected (the flipped bit
+    // is restored in host memory, mirroring what a real SECDED code returns to
+    // the CPU) and counted; a word with two or more corrupted bits is detected
+    // but left uncorrectable, as SECDED cannot repair it. Anchor the read in
+    // the SAME address space doMemoryCorruption used: it keys the flipped word
+    // on toHostAddr(range.start() + getCtrlAddr(aggressor) +
+    // distance*row_bytes), and getCtrlAddr(victim_read) equals
+    // getCtrlAddr(aggressor) + distance*row_bytes. getCtrlAddr is linear in the
+    // low (column) bits, so this reconstructs the exact host word that was
+    // corrupted. Using the raw packet address here instead would never match.
+    if (enableEcc && eccAlgorithm == 1 && mem_pkt->isRead()) {
+        uint8_t *rbase =
+            toHostAddr(range.start() + getCtrlAddr(mem_pkt->addr));
+        if (rbase) {
+            for (unsigned off = 0; off < burstSize; off += 8) {
+                const uintptr_t hword =
+                    reinterpret_cast<uintptr_t>(rbase + off)
+                    & ~uintptr_t(7);
+                auto it = ecc_word_flips.find(hword);
+                if (it == ecc_word_flips.end())
+                    continue;
+                const uint64_t mask = it->second;
+                if (mask == 0) {
                     ecc_word_flips.erase(it);
+                    continue;
                 }
+                const int nerr = __builtin_popcountll(mask);
+                if (nerr == 1) {
+                    // single-bit error: SECDED corrects it in place
+                    const int bitpos = __builtin_ctzll(mask);
+                    uint8_t *b = reinterpret_cast<uint8_t *>(hword)
+                                 + (bitpos / 8);
+                    *b ^= static_cast<uint8_t>(1u << (bitpos % 8));
+                    stats.rowHammerEccCorrected++;
+                    DPRINTF(ECC, "SECDED corrected 1-bit error at host "
+                            "word %#lx (bit %d)\n",
+                            (unsigned long) hword, bitpos);
+                } else {
+                    // two or more bits: detected, uncorrectable
+                    stats.rowHammerEccDetected++;
+                    DPRINTF(ECC, "SECDED detected %d-bit error at host "
+                            "word %#lx (uncorrectable)\n", nerr,
+                            (unsigned long) hword);
+                }
+                ecc_word_flips.erase(it);
             }
         }
     }
@@ -3769,23 +3767,25 @@ DRAMInterface::Rank::processRefreshEvent()
                             // this logic should be bypassed when the number of
                             // aggressor rows will be more than the trr_table's
                             // size.
+                            // Bounds guard: this refresh touches the aggressor
+                            // row's neighbours at ar-3 .. ar+3. rhTriggers is
+                            // sized to rowsPerBank, so an aggressor within 3
+                            // rows of either edge would index the vector out of
+                            // bounds. Those extreme rows are not realistic
+                            // hammer targets; skip the reset rather than crash.
+                            const long int ar = b.trr_table[max_idx][2];
+                            if (ar >= 3 &&
+                                    ar + 3 < (long int) dram.rowsPerBank) {
+                                b.rhTriggers[ar + 1][0] = 0;
+                                b.rhTriggers[ar][1] = 0;
+                                b.rhTriggers[ar - 2][2] = 0;
+                                b.rhTriggers[ar - 3][3] = 0;
 
-                                b.rhTriggers[b.trr_table[max_idx][2] + 1][0] =
-                                    0;
-                                b.rhTriggers[b.trr_table[max_idx][2]][1] = 0;
-                                b.rhTriggers[b.trr_table[max_idx][2] - 2][2] =
-                                    0;
-                                b.rhTriggers[b.trr_table[max_idx][2] - 3][3] =
-                                    0;
-
-                                b.rhTriggers[b.trr_table[max_idx][2] - 1][3] =
-                                    0;
-                                b.rhTriggers[b.trr_table[max_idx][2]][2] = 0;
-                                b.rhTriggers[b.trr_table[max_idx][2] + 2][1] =
-                                    0;
-                                b.rhTriggers[b.trr_table[max_idx][2] + 3][0] =
-                                    0;
-                            // }
+                                b.rhTriggers[ar - 1][3] = 0;
+                                b.rhTriggers[ar][2] = 0;
+                                b.rhTriggers[ar + 2][1] = 0;
+                                b.rhTriggers[ar + 3][0] = 0;
+                            }
                         }
                     }
                 }
@@ -3902,39 +3902,36 @@ DRAMInterface::Rank::processRefreshEvent()
 
                                 // need to reset the rhTriggers too for the
                                 // victim rows.
-                                b.rhTriggers[b.trr_table[max_idx][2] + 1][0] =
-                                    0;
-                                b.rhTriggers[b.trr_table[max_idx][2]][1] = 0;
-                                b.rhTriggers[b.trr_table[max_idx][2] - 2][2] =
-                                    0;
-                                b.rhTriggers[b.trr_table[max_idx][2] - 3][3] =
-                                    0;
+                                // Bounds guard: this refresh touches ar-4 ..
+                                // ar+4. rhTriggers is sized to rowsPerBank, so
+                                // an aggressor within 4 rows of either edge
+                                // would index out of bounds. Skip rather than
+                                // crash (edge rows are not realistic targets).
+                                const long int ar = b.trr_table[max_idx][2];
+                                if (ar >= 4 &&
+                                        ar + 4 < (long int) dram.rowsPerBank) {
+                                b.rhTriggers[ar + 1][0] = 0;
+                                b.rhTriggers[ar][1] = 0;
+                                b.rhTriggers[ar - 2][2] = 0;
+                                b.rhTriggers[ar - 3][3] = 0;
 
-                                b.rhTriggers[b.trr_table[max_idx][2] - 1][3] =
-                                    0;
-                                b.rhTriggers[b.trr_table[max_idx][2]][2] = 0;
-                                b.rhTriggers[b.trr_table[max_idx][2] + 2][1] =
-                                    0;
-                                b.rhTriggers[b.trr_table[max_idx][2] + 3][0] =
-                                    0;
+                                b.rhTriggers[ar - 1][3] = 0;
+                                b.rhTriggers[ar][2] = 0;
+                                b.rhTriggers[ar + 2][1] = 0;
+                                b.rhTriggers[ar + 3][0] = 0;
 
                                 // so. sk hynix dimms cannot have half-doubles
                                 // impressive
-                                b.rhTriggers[b.trr_table[max_idx][2] - 4][3] =
-                                    0;
-                                b.rhTriggers[b.trr_table[max_idx][2] - 3][2] =
-                                    0;
-                                b.rhTriggers[b.trr_table[max_idx][2] - 1][1] =
-                                    0;
-                                b.rhTriggers[b.trr_table[max_idx][2]][0] = 0;
+                                b.rhTriggers[ar - 4][3] = 0;
+                                b.rhTriggers[ar - 3][2] = 0;
+                                b.rhTriggers[ar - 1][1] = 0;
+                                b.rhTriggers[ar][0] = 0;
 
-                                b.rhTriggers[b.trr_table[max_idx][2] + 4][0] =
-                                    0;
-                                b.rhTriggers[b.trr_table[max_idx][2] + 3][1] =
-                                    0;
-                                b.rhTriggers[b.trr_table[max_idx][2] + 1][2] =
-                                    0;
-                                b.rhTriggers[b.trr_table[max_idx][2]][3] = 0;
+                                b.rhTriggers[ar + 4][0] = 0;
+                                b.rhTriggers[ar + 3][1] = 0;
+                                b.rhTriggers[ar + 1][2] = 0;
+                                b.rhTriggers[ar][3] = 0;
+                                }
 
                                 // for (int j = 0 ; j < num_neighbor_rows; j++)
                                 // {
