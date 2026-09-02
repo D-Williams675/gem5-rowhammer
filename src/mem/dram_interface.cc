@@ -1143,6 +1143,13 @@ DRAMInterface::doMemoryCorruption(MemPacket* mem_pkt, uint8_t bank,
     // The row buffer size is 1 KiB for 8x8
     // This means that there are 8192 columns 
 
+    // Defensive bound: the flip is written at dest[col], so col must be within
+    // the row buffer or we would corrupt (and memcpy back) past the buffer.
+    // selectVictimColumn clamps synthetic columns, but a device-map column on a
+    // smaller-row-buffer geometry is not otherwise checked -- audit 2.
+    fatal_if(col >= row_size, "RowHammer victim column %u is outside the row "
+             "buffer (%zu bytes)\n", col, row_size);
+
     // read row_size from host addr
     uint8_t *dest = new uint8_t[row_size];
     std::memcpy(dest, host_addr, row_size);
@@ -1157,10 +1164,12 @@ DRAMInterface::doMemoryCorruption(MemPacket* mem_pkt, uint8_t bank,
     // When SECDED lands it must store an owned copy of the ORIGINAL
     // (pre-corruption) word keyed on the victim's own address.
 
-    // the bit to corrupt needs to be selected randomly! Let's just use an
-    // existing distribution to generate this bit. There are 8 capacitors
-    // per column in 8x8 dimm
-    uint64_t corrupt_bit = hd_distribution(generator) % 8;
+    // the bit to corrupt needs to be selected randomly! There are 8 capacitors
+    // per column in an 8x8 dimm. Draw from the DEDICATED corruptionGenerator,
+    // NOT the shared `generator`: drawing from the shared stream here shifted
+    // the flip-decision RNG so that enabling memory corruption changed which
+    // cells flipped for a given seed -- audit 2.
+    uint64_t corrupt_bit = corruptionGenerator() % 8;
     dest[col] ^= (1 << corrupt_bit);
 
     // Functional SECDED tracking: record the exact host bit just flipped,
@@ -1412,11 +1421,13 @@ DRAMInterface::activateBank(Rank& rank_ref, Bank& bank_ref,
 
                         idx = (int)bank_ref.companion_entries;
 
-                        // TODO: This part of the code is not required. Verify
-                        // this claim.
-                        if (bank_ref.companion_entries <
-                                companionTableLength - 1)
-                            bank_ref.companion_entries += 1;
+                        // Fill the next free slot. This used to stop one short
+                        // (< companionTableLength - 1), so companion_entries
+                        // never reached the table length, the outer "is there
+                        // space" test was always true, and the eviction branch
+                        // below was DEAD CODE -- the table silently overwrote
+                        // its last slot forever once nominally full -- audit 2.
+                        bank_ref.companion_entries += 1;
                     }
                     else {
                         // there is no space left in the companion table.
@@ -1441,8 +1452,11 @@ DRAMInterface::activateBank(Rank& rank_ref, Bank& bank_ref,
                         }
                     }
 
-                    // assert idx is within the counterTableLength range.
-                    assert(bank_ref.companion_entries < companionTableLength);
+                    // assert the insertion index is within the companion table.
+                    // (companion_entries can now equal the table length when
+                    // full, so it is idx -- not the count -- that must be in
+                    // range -- audit 2.)
+                    assert(idx >= 0 && idx < (int)companionTableLength);
 
                     // creating this entry in the companion table.
 
@@ -1476,11 +1490,11 @@ DRAMInterface::activateBank(Rank& rank_ref, Bank& bank_ref,
                             // std :: cout << "_x " << trr_idx << " " <<
                             // bank_ref.entries << std :: endl;
 
-                            // TODO: This part of the code might not be
-                            // required. Double check this.
-
-                            if (bank_ref.entries < counterTableLength - 1)
-                                bank_ref.entries++;
+                            // Fill the next free slot. Was "< counterTableLength
+                            // - 1", which stopped one short so the counter table
+                            // never filled and the eviction branch was dead code
+                            // -- audit 2.
+                            bank_ref.entries++;
                         }
                         else {
                             // there is no space for a new row.
@@ -1722,8 +1736,9 @@ DRAMInterface::activateBank(Rank& rank_ref, Bank& bank_ref,
                     // part of the program.
                     if (bank_ref.entries < counterTableLength) {
                         trr_idx = bank_ref.entries;
-                        if (bank_ref.entries < counterTableLength - 1)
-                            bank_ref.entries += 1;
+                        // Fill the next free slot (was "< counterTableLength -
+                        // 1", one short, so eviction never ran) -- audit 2.
+                        bank_ref.entries += 1;
                     }
                     else {
                         for (int i = 0; i < counterTableLength ; i++) {
@@ -1793,11 +1808,15 @@ DRAMInterface::activateBank(Rank& rank_ref, Bank& bank_ref,
                 }
                 else {
                     // there is no space in the trr table. replace the row with
-                    // the lowest act count.
+                    // the lowest act count. The comparator was sign-flipped
+                    // ('<'), which converged min_idx to the HIGHEST-count slot
+                    // and then overwrote it -- variant 4 evicted the very
+                    // aggressor it should protect against. Every sibling variant
+                    // uses '>' -- audit 2.
                     int min_idx = 0;
                     assert(bank_ref.entries == counterTableLength);
                     for (int i = 0 ; i < counterTableLength; i++)
-                        if (bank_ref.trr_table[min_idx][3] <
+                        if (bank_ref.trr_table[min_idx][3] >
                                 bank_ref.trr_table[i][3])
                             min_idx = i;
 
@@ -1912,12 +1931,13 @@ DRAMInterface::activateBank(Rank& rank_ref, Bank& bank_ref,
             // PARA does not have a sampler/counting mechanism. it just issues
             // rowhammer refreshes with a probability of P.
 
-            struct timeval time;
-            gettimeofday(&time,NULL);
-
-            srand((time.tv_sec * 1000) + (time.tv_usec / 1000));
-
-            uint64_t prob = rand() % 10000 + 1;
+            // PARA issues a probabilistic adjacent-row refresh with probability
+            // p (here 100/10000 = 0.01). Draw from the seeded `generator` so the
+            // decision is REPRODUCIBLE under --seed. The old code reseeded from
+            // the wall clock (gettimeofday + srand) on every ACT and drew with
+            // rand(), so identical-seed runs diverged and PARA could not be
+            // reproduced or compared -- audit 2.
+            uint64_t prob = (generator() % 10000) + 1;
 
             // the inhibitor cannot be installed here. however, explicit
             // refreshing can only be done here.
@@ -2272,7 +2292,9 @@ DRAMInterface::doBurstAccess(MemPacket* mem_pkt, Tick next_burst_at,
                 }
                 const int nerr = __builtin_popcountll(mask);
                 if (nerr == 1) {
-                    // single-bit error: SECDED corrects it in place
+                    // single-bit error: SECDED corrects (scrubs) it in host
+                    // memory, so the word is now clean -- drop the tracking
+                    // entry.
                     const int bitpos = __builtin_ctzll(mask);
                     uint8_t *b = reinterpret_cast<uint8_t *>(hword)
                                  + (bitpos / 8);
@@ -2281,14 +2303,19 @@ DRAMInterface::doBurstAccess(MemPacket* mem_pkt, Tick next_burst_at,
                     DPRINTF(ECC, "SECDED corrected 1-bit error at host "
                             "word %#lx (bit %d)\n",
                             (unsigned long) hword, bitpos);
+                    ecc_word_flips.erase(it);
                 } else {
-                    // two or more bits: detected, uncorrectable
+                    // two or more bits: detected but UNCORRECTABLE. The word is
+                    // still corrupt in host memory, so KEEP the tracking entry
+                    // -- erasing it (as the code used to) made later reads of
+                    // the same bad word return corrupted data silently as clean,
+                    // and a subsequent single flip into it even produced a false
+                    // "corrected" -- audit 2.
                     stats.rowHammerEccDetected++;
                     DPRINTF(ECC, "SECDED detected %d-bit error at host "
                             "word %#lx (uncorrectable)\n", nerr,
                             (unsigned long) hword);
                 }
-                ecc_word_flips.erase(it);
             }
         }
     }
@@ -3687,9 +3714,16 @@ DRAMInterface::Rank::processRefreshEvent()
                 // This is no TRR Variant. It does absolutely nothing.
                 break;
             case 1:
+            case 3:
             case 4:
                 // TRR variant A always picks exactly 2 rows with the
-                // highest activation count.
+                // highest activation count. Variant 3 (Vendor C) shares this
+                // targeted refresh: it populates the same trr_table (no
+                // companion table) in activateBank but previously had an EMPTY
+                // refresh case, so it tracked aggressors yet never refreshed
+                // their victims -- i.e. it was inert (== baseline). Routing it
+                // through this counter-table-driven targeted refresh makes it a
+                // real, tracking-driven defense -- audit 2.
                 num_neighbor_rows = 2;
                 // ensure that the number of rows to be refreshed is not 0
 
@@ -3842,6 +3876,14 @@ DRAMInterface::Rank::processRefreshEvent()
                             if (b.trr_table[i][3] > dram.trrThreshold) {
                                 if (max_val < b.trr_table[i][3]
                                     ) {
+                                    // Advance the running maximum. max_val was
+                                    // frozen at bank0/slot0 and never updated,
+                                    // so the comparison used a stale floor and
+                                    // the LAST above-threshold row won instead
+                                    // of the highest-count one -- the wrong
+                                    // aggressor's victims were refreshed -- audit
+                                    // 2.
+                                    max_val = b.trr_table[i][3];
                                     max_idx = i;
                                     max_bank_idx = bank_count;
                                     // there is some row to refresh
@@ -3956,9 +3998,8 @@ DRAMInterface::Rank::processRefreshEvent()
                     // for (auto)
                 }
                 break;
-            case 3:
-                // micron
-                break;
+            // case 3 (Vendor C / Micron) is handled together with case 1/4
+            // above -- audit 2. It no longer has an empty (inert) refresh case.
             case 5: {
                 // this corresponds to PARA.
 

@@ -647,7 +647,10 @@ class DRAMInterface : public MemInterface
     const std::string pMatrixFileName;
     const int eccAlgorithm;
 
-    uint8_t* pMatrix;
+    // Initialized to nullptr: the pMatrix loader only allocates when ECC is
+    // enabled with a p-matrix file, so without this the member would be an
+    // uninitialized pointer (latent hazard) -- audit 2.
+    uint8_t* pMatrix = nullptr;
 
     // Extra data structures needed to enable ECC. The addresses are row
     // aligned. however, we'll keep a track of the columns and the data depen
@@ -673,6 +676,15 @@ class DRAMInterface : public MemInterface
     // random_mt (via m5.core.seedRandom()) in the DRAMInterface constructor,
     // so results are reproducible and controllable by the simulation seed.
     std::mt19937_64 generator;
+
+    // Dedicated RNG for choosing which of the 8 bits in a corrupted byte
+    // flips (doMemoryCorruption). It MUST be separate from `generator`: that
+    // stream drives the flip decisions, and drawing the corrupt-bit from it
+    // shifted the stream so that turning enable_memory_corruption on changed
+    // WHICH cells flipped for a given seed (an observational feature must not
+    // alter the simulated result). Seeded from a fixed constant so the bit
+    // choice is reproducible and independent of the main stream -- audit 2.
+    std::mt19937_64 corruptionGenerator{0x9E3779B97F4A7C15ULL};
 
 
     uint64_t num_trr_refreshes = 0;
