@@ -22,10 +22,9 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            build-essential libboost-all-dev libhdf5-dev libpng-dev \
+            build-essential m4 scons libboost-all-dev libhdf5-dev libpng-dev \
             libprotobuf-dev pkg-config protobuf-compiler python3-dev \
-            python3-pip zlib1g-dev
-          python3 -m pip install --user scons
+            zlib1g zlib1g-dev
 
       - name: Validate Python and device maps
         run: |
@@ -34,7 +33,11 @@ jobs:
             >/dev/null
 
       - name: Build gem5
-        run: ~/.local/bin/scons --ignore-style build/NULL/gem5.opt -j2
+        run: |
+          if ! /usr/bin/scons --ignore-style build/NULL/gem5.opt -j2; then
+            find build -name scons_config.log -print -exec tail -n 250 {} \;
+            exit 1
+          fi
 
       - name: Run stock DRAM smoke test
         run: |
@@ -58,6 +61,6 @@ jobs:
         with:
           name: hammersim-ci-logs
           path: |
-            build/NULL/scons_config.log
+            build/NULL/gem5.build/scons_config.log
             m5out-stock/
             m5out-hammersim/
