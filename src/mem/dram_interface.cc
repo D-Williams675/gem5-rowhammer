@@ -1095,8 +1095,20 @@ DRAMInterface::doMemoryCorruption(MemPacket* mem_pkt, uint8_t bank,
     // One DRAM row/page in bytes for this interface.
     const Addr row_bytes = banksPerRank * burstsPerRowBuffer * burstSize;
 
-    // Move to row+1 while keeping column offset as-is (same column).
-    const Addr next_ctrl = ctrl_off + (distance * row_bytes);
+    // Anchor at COLUMN 0 of the victim row (same bank as the aggressor), then
+    // add the weak column `col` below. The controller address lays out
+    // [row][bank][column] with the column in the low log2(rowBufferSize) bits
+    // (the traffic maps row r -> r*row_bytes and bank b -> b*rowBufferSize), so
+    // masking those bits off zeroes the column while keeping bank+row. The old
+    // code kept the aggressor's column offset here and THEN added `col`, so the
+    // flip landed at (aggr_col + col) -- the wrong cell -- and copying a whole
+    // row from that non-row-aligned pointer could run off the end of the backing
+    // store for a victim near the top of memory (audit 2, finding 1). Zeroing
+    // the column makes host_addr column-0-aligned, so dest[col] (col in
+    // [0,rowBufferSize)) lands exactly at column col and stays within the row.
+    const Addr col_mask = static_cast<Addr>(rowBufferSize) - 1;
+    const Addr row_base = ctrl_off & ~col_mask;
+    const Addr next_ctrl = row_base + (distance * row_bytes);
 
     // To make sure that we're causing bitflips at the right places, add an
     // assert that the row is calculated correctly. it needs to be correctly
@@ -1343,7 +1355,11 @@ DRAMInterface::activateBank(Rank& rank_ref, Bank& bank_ref,
 
             bool found_flag = false;
 
-            for (int i = 0; i < std::max(
+            // Scan only the FILLED entries (std::min, not std::max). The table
+            // is zero-initialized, so scanning empty slots let rank0/bank0/row0
+            // spuriously "match" a blank entry -- audit 2. entries never exceeds
+            // the table length, so min() is the fill count.
+            for (int i = 0; i < std::min(
                 counterTableLength, bank_ref.entries); i++) {
                 // found this addr in the trr table.
                 if (bank_ref.trr_table[i][0] == rank_ref.rank &&
@@ -1384,7 +1400,7 @@ DRAMInterface::activateBank(Rank& rank_ref, Bank& bank_ref,
                 int companion_idx = 0;
                 bool companion_found_flag = false;
 
-                for (int i = 0 ; i < std :: max(companionTableLength,
+                for (int i = 0 ; i < std :: min(companionTableLength,
                         bank_ref.companion_entries); i++) {
                     // found this address in the companion table.
                     if (bank_ref.companion_table[i][0] == rank_ref.rank &&
@@ -1619,7 +1635,7 @@ DRAMInterface::activateBank(Rank& rank_ref, Bank& bank_ref,
                 // forcing entry to the companion table when it is full.
 
                 bool found_flag = false;
-                for (int i = 0; i < std::max(
+                for (int i = 0; i < std::min(
                         counterTableLength, bank_ref.entries); i++) {
                     // found this addr
                     if (bank_ref.trr_table[i][0] == rank_ref.rank &&
@@ -1711,7 +1727,7 @@ DRAMInterface::activateBank(Rank& rank_ref, Bank& bank_ref,
                 // for this row or not.
 
                 bool found_flag = false;
-                for (int i = 0; i < std::max(
+                for (int i = 0; i < std::min(
                         counterTableLength, bank_ref.entries); i++) {
                     // found this addr
                     if (bank_ref.trr_table[i][0] == rank_ref.rank &&
@@ -1766,7 +1782,7 @@ DRAMInterface::activateBank(Rank& rank_ref, Bank& bank_ref,
 
             // try searching in the trr_table first.
             bool found_flag = false;
-            for (int i = 0; i < std::max(counterTableLength,
+            for (int i = 0; i < std::min(counterTableLength,
                     bank_ref.entries); i++) {
                 // found this addr in the trr table.
                 if (bank_ref.trr_table[i][0] == rank_ref.rank &&
@@ -1880,7 +1896,7 @@ DRAMInterface::activateBank(Rank& rank_ref, Bank& bank_ref,
                 // forcing entry to the companion table when it is full.
 
                 bool found_flag = false;
-                for (int i = 0; i < std::max(
+                for (int i = 0; i < std::min(
                         counterTableLength, bank_ref.entries); i++) {
                     // found this addr
                     if (bank_ref.trr_table[i][0] == rank_ref.rank &&
@@ -2219,6 +2235,26 @@ DRAMInterface::doBurstAccess(MemPacket* mem_pkt, Tick next_burst_at,
         // this is a write operation.
         for (int i = 0 ; i < 1024; i++) {
             bank_ref.flagged_entries[mem_pkt->row][i] = false;
+        }
+
+        // A write recomputes the SECDED code for the words it overwrites, so
+        // any RowHammer corruption previously tracked in those words is gone.
+        // Drop the corresponding ecc_word_flips entries: otherwise an
+        // uncorrectable (multi-bit) error would linger past the overwrite that
+        // fixed it, and words never read back would accumulate in the map for
+        // the life of the run (audit 2). Anchor the burst in the same host
+        // address space the corruption/read sides use.
+        if (enableEcc && eccAlgorithm == 1) {
+            uint8_t *wbase =
+                toHostAddr(range.start() + getCtrlAddr(mem_pkt->addr));
+            if (wbase) {
+                for (unsigned off = 0; off < burstSize; off += 8) {
+                    const uintptr_t hword =
+                        reinterpret_cast<uintptr_t>(wbase + off)
+                        & ~uintptr_t(7);
+                    ecc_word_flips.erase(hword);
+                }
+            }
         }
     }
 
@@ -2891,34 +2927,25 @@ DRAMInterface::DRAMInterface(const DRAMInterfaceParams &_p)
 
     DPRINTF(RowHammer, "Initialized device map successfully!\n");
 
-    // Optionally load a pMatrix file if one was supplied. The functional
-    // SECDED implementation no longer needs it (it tracks flipped bits
-    // directly in ecc_word_flips), so a missing pMatrix is not an error.
+    // A p_matrix file used to configure a SECDED parity matrix, but the
+    // functional SECDED implementation tracks flipped bits directly in
+    // ecc_word_flips and does not consult a parity matrix. The old loader
+    // allocated an 8-byte buffer (leaked -- never freed), read it, then never
+    // used it, and its "too few 'A'" fatal message was mislabeled. Warn that a
+    // supplied file is ignored rather than loading and leaking it -- audit 2.
     if (enableEcc && pMatrixFileName != "NULL") {
-        std::ifstream pm(pMatrixFileName, std::ios::binary);
-        if (!pm) {
-            fatal("The given pMatrix file not found!\n");
-        }
+        warn("A p_matrix file (%s) was supplied, but the functional SECDED ECC "
+             "does not use a parity matrix; it will be ignored.\n",
+             pMatrixFileName);
+    }
 
-        pMatrix = new uint8_t[8];
-        std::size_t n = 0;
-
-        // Read byte-by-byte, accept only 'A' and store it
-        char ch;
-        while (pm.get(ch)) {
-            if (ch == 'A') {
-                *(pMatrix + n) = static_cast<uint8_t>(ch);
-                ++n;
-                if (n == 8) break;
-            }
-        }
-        pm.close();
-        
-        if (n != 8) {
-            fatal("Error: pMatrix file had only A entries; need 8\n");
-        }
-
-
+    // ECC is only implemented for ecc_algorithm == 1 (SECDED). Any other value
+    // silently did nothing; warn so an enabled-but-inactive ECC is visible
+    // instead of appearing to work -- audit 2.
+    if (enableEcc && eccAlgorithm != 1) {
+        warn("enable_ecc is set but ecc_algorithm=%d is not implemented; ECC "
+             "will be INACTIVE (only ecc_algorithm=1 / SECDED is supported).\n",
+             eccAlgorithm);
     }
 
     // Initializing random nnumber distributions
@@ -4590,7 +4617,29 @@ DRAMInterface::DRAMStats::DRAMStats(DRAMInterface &_dram)
              "Data bus utilization in percentage for writes"),
 
     ADD_STAT(pageHitRate, statistics::units::Ratio::get(),
-             "Row buffer hit rate, read and write combined")
+             "Row buffer hit rate, read and write combined"),
+
+    // RowHammer / mitigation counters. These were declared but never
+    // ADD_STAT-registered, so they incremented at runtime yet never appeared in
+    // stats.txt (visible only via debug flags) -- audit 2. Register them here.
+    ADD_STAT(rowHammerTotalBitflips, statistics::units::Count::get(),
+             "Total RowHammer bit flips induced"),
+    ADD_STAT(rowHammerSingleSidedBitflips, statistics::units::Count::get(),
+             "RowHammer single-sided bit flips"),
+    ADD_STAT(rowHammerDoubleSidedBitflips, statistics::units::Count::get(),
+             "RowHammer double-sided bit flips"),
+    ADD_STAT(rowHammerHalfDoubleBitflips, statistics::units::Count::get(),
+             "RowHammer half-double bit flips"),
+    ADD_STAT(rowHammerCorruptedBitCount, statistics::units::Count::get(),
+             "Number of bits corrupted in memory by RowHammer"),
+    ADD_STAT(rowHammerEccCorrected, statistics::units::Count::get(),
+             "Single-bit RowHammer errors corrected by SECDED ECC"),
+    ADD_STAT(rowHammerEccDetected, statistics::units::Count::get(),
+             "Multi-bit RowHammer errors detected (uncorrectable) by ECC"),
+    ADD_STAT(rowHammerSamplerTriggers, statistics::units::Count::get(),
+             "Number of TRR sampler insertions/updates"),
+    ADD_STAT(rowHammerInhibitorTriggers, statistics::units::Count::get(),
+             "Number of TRR inhibitor-triggered refreshes")
 
 {
 }
