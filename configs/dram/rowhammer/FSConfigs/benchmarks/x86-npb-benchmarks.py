@@ -104,6 +104,27 @@ parser.add_argument(
     help="Input the benchmark program to execute.",
     choices=benchmark_choices,
 )
+parser.add_argument(
+    "--kernel",
+    default=os.environ.get(
+        "HAMMERSIM_KERNEL",
+        os.path.expanduser("~/.cache/gem5/x86-linux-kernel-5.4.49"),
+    ),
+    help="Path to the x86 kernel (or set HAMMERSIM_KERNEL).",
+)
+parser.add_argument(
+    "--disk-image",
+    default=os.environ.get(
+        "HAMMERSIM_NPB_DISK_IMAGE",
+        os.path.expanduser("~/.cache/gem5/x86-npb"),
+    ),
+    help="Path to the NPB disk image (or set HAMMERSIM_NPB_DISK_IMAGE).",
+)
+parser.add_argument(
+    "--guest-npb-dir",
+    default="/home/gem5/NPB3.3-OMP/bin",
+    help="Directory containing NPB binaries inside the guest.",
+)
 
 parser.add_argument(
     "--size",
@@ -119,13 +140,13 @@ parser.add_argument(
     help="Optionally put the maximum number of ticks to execute during the "
     "ROI. It accepts an integer value.",
 )
-parser.add_argument(          
-    "--take-checkpoint",        
-    type=str,                 
-    required=True,            
+parser.add_argument(
+    "--take-checkpoint",
+    type=str,
+    required=True,
     choices=["true", "false"],
-    help=""                   
-)                             
+    help="",
+)
 
 args = parser.parse_args()
 
@@ -171,6 +192,10 @@ cache_hierarchy = MESITwoLevelCacheHierarchy(
 memory = SingleChannelDDR4_2400(size="3GB")
 
 # Setup the rowhammer parameters to simulate
+memory._dram_class.enable_rowhammer = True
+memory._dram_class.device_file = os.path.join(
+    os.getcwd(), "util/hammersim/synthetic-device-map.json"
+)
 memory._dram_class.trr_variant = 0
 
 memory._dram_class.ranks_per_channel = 1
@@ -225,7 +250,7 @@ board = X86Board(
 # properly.
 
 command = (
-    f"/home/gem5/NPB3.3-OMP/bin/{args.benchmark}.{args.size}.x;"
+    f"{args.guest_npb_dir}/{args.benchmark}.{args.size}.x;"
     + "sleep 5;"
     + "m5 exit;"
 )
@@ -233,15 +258,11 @@ command = (
 board.set_kernel_disk_workload(
     # The x86 linux kernel will be automatically downloaded to the
     # `~/.cache/gem5` directory if not already present.
-    kernel=CustomResource(
-        os.path.join(
-            os.path.expanduser("~"), ".cache/gem5/x86-linux-kernel-5.4.49"
-        )
-    ),
+    kernel=CustomResource(args.kernel),
     # The x86-npb image will be automatically downloaded to the
     # `~/.cache/gem5` directory if not already present.
     disk_image=CustomDiskImageResource(
-        os.path.join("/home/kaustavg/.cache/gem5/x86-npb"),
+        args.disk_image,
         root_partition="1"
     ),
     readfile_contents=command,

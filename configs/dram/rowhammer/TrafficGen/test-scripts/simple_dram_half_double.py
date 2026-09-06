@@ -4,6 +4,10 @@ import os
 
 
 class DRAM_TEST(DDR4_2400_8x8):
+    enable_rowhammer = True
+    device_file = os.path.join(
+        os.getcwd(), "util/hammersim/synthetic-device-map.json"
+    )
     ranks_per_channel = 1
     trr_variant = 0
     # not relevant stats

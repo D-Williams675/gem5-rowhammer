@@ -1,312 +1,219 @@
-# Information on using the RowHammer Branch (HammerSim)
+# HammerSim RowHammer model
 
-## Introduction
+HammerSim extends gem5's DRAM interface with opt-in RowHammer disturbance,
+functional data corruption, simplified functional SECDED, and several
+research-oriented Target Row Refresh (TRR) models.
 
-This file contains information on how to get started with the RowHammer module.
-gem5 does not support RowHammer/data corruption by default but this repository adds several modifications to enable probabilistic modeling of RowHammer within gem5 in very fine-grained resolution, at the capacitor level.
+The RowHammer model is disabled by default. An ordinary gem5 DRAM
+configuration therefore behaves like upstream gem5 and does not load a device
+map or allocate HammerSim tracking state.
 
-TL;DR If you want to understand the code structure and data corruption, see [#understanding HammerSim](#understanding-the-code-structure).
-TL;DR If you want to add a new mitigation, see [#adding new mitigation](#adding-a-new-rowhammer-mitigation).
-TL;DR If you're interested to start using the infrastructure ASAP, see [#using HammerSim](#using-hammersim)
+## Clone and build
 
-## Changes in the source and parameters to specify
+HammerSim uses nlohmann/json as a Git submodule:
 
-Changes to the gem5's source is confined to the following files:
-- `src/mem/DRAMInterface.py`
-- `src/mem/mem_ctrl.cc`
-- `src/mem/mem_ctrl.hh`
-- `src/mem/packet.hh`
-- `src/mem/dram_interface.hh`
-- `src/mem/dram_interface.cc`
-- `src/mem/mem_interface.hh`
-- `src/mem/mem_interface.cc`
-- `src/mem/SConscript`
+```sh
+git clone --recurse-submodules https://github.com/D-Williams675/gem5-rowhammer.git
+cd gem5-rowhammer
+scons build/NULL/gem5.opt -j"$(nproc)"
+```
 
-Most of the RowHammer parameters are defined in `src/mem/DRAMInterface.py`.
-In the class `DRAMInterface`, we have defined the following parameters:
-- `device_file` - Absolute path to the device map file. The "device map" file
-  refers to a list of all weak cells in the DRAM device. Currently we only
-  only flip bits at the column level. The resolution of a bit flip can be
-  further tuned to be at the capacitor level. This file is a `.json` file with
-  the following format:
-  ```json
-  {
-    "rank_number": {
-        "bank_number": {
-            "row_number": ["(int)list_of_all_weak_columns"],
-        }
+If the repository was cloned without submodules, run:
+
+```sh
+git submodule update --init --recursive
+```
+
+The `NULL` build is sufficient for the synthetic traffic-generator
+configurations. Build `X86` for the full-system configurations.
+
+## Quick verification
+
+The deterministic smoke test performs three aggressor ACTs, functionally flips
+one bit in the victim row, reads the victim, and corrects the bit through the
+simplified SECDED model:
+
+```sh
+build/NULL/gem5.opt --outdir=m5out-hammersim \
+  configs/dram/rowhammer/TrafficGen/hammersim_smoke.py
+```
+
+The resulting `stats.txt` should report one total bit flip, one functionally
+corrupted bit, and one ECC correction. The `HammerSim CI` GitHub workflow
+builds gem5 and checks these values automatically. It also runs a stock DRAM
+configuration with HammerSim disabled.
+
+## Configuration
+
+Set HammerSim parameters on a `DRAMInterface` subclass:
+
+```python
+class HammerSimDRAM(DDR4_2400_8x8):
+    enable_rowhammer = True
+    device_file = "util/hammersim/synthetic-device-map.json"
+    rowhammer_threshold = 50000
+    single_sided_prob = int(1e7)
+    double_sided_prob = int(1e5)
+    half_double_prob = int(1e9)
+    trr_variant = 0
+```
+
+Important parameters:
+
+- `enable_rowhammer`: Enables disturbance tracking and device-map loading.
+  It defaults to `False`.
+- `device_file`: Path to an uncompressed JSON device map. It is required when
+  HammerSim is enabled.
+- `rowhammer_threshold`: Number of relevant ACT commands per bit-flip
+  opportunity.
+- `single_sided_prob`, `double_sided_prob`, and `half_double_prob`:
+  Positive probability denominators. For example, `1000` means a probability
+  of exactly 1/1000 at each corresponding opportunity. HammerSim uses gem5's
+  seeded random-number generator, so simulations respect gem5's reproducible
+  random seed.
+- `enable_memory_corruption`: Applies selected bit flips to gem5's backing
+  memory. It requires `enable_rowhammer=True`.
+- `enable_ecc`: Enables simplified functional SECDED. It requires functional
+  corruption and `ecc_algorithm=1`.
+- `synthetic_traffic`: Retained for configuration compatibility. Probability
+  opportunities are now consistently evaluated at threshold boundaries for
+  all workload types.
+- `rh_stat_dump` and `rh_stat_file`: Append RowHammer trace information at
+  full-refresh boundaries.
+
+All thresholds and probability denominators must be non-zero. Invalid
+combinations fail during configuration instead of failing later in a
+simulation.
+
+## Device-map format
+
+A device map lists weak byte-columns by rank, bank, and row:
+
+```json
+{
+  "0": {
+    "4": {
+      "58": [18, 151, 272]
     }
   }
-  ```
-  For getting started, you can use the map included in the repository under `prob-005.json.zip`.
-  This map is statistically generated using VARIUS
-  (S. Sarangi et al.) (see the abstract/writeup for details). You can also
-  generate this map from the hardware using a RowHammer software like TRRespass
-  (P. Frigo et al.) or Blacksmith (P. Jattke et al.).
-- `rowhammer_threshold` - This is the number of activates requires to trigger a
-  single bitflip in a victim row. This number is taken from previous research
-  (Y. Kim et al., J. S. Kim et al.) which states that the minimum activates
-  required for DDR3 DRAM DIMMs is 139,000 and DDR4 DRAM DIMMs is 50,000. LPDDR
-  numbers are even lower (~8,000 -- 16,000).
-- `counter_table_length` - This is a Target Row Refresh (TRR) specific
-  parameter. TRR is the mitigation mechanism present in all modern day DDR4
-  DRAM DIMMs. Most of these TRR parameters are either reverse-engineered via
-  previously mentioned RowHammer softwares or are taken from other reverse-
-  engineering papers including but not limited to (H. Hassan et al.).
-  `counter_table_length` is the total size of the main TRR table. TRR samples
-  frequently activated rows. This table keeps a track of these rows.
-- `trr_variant` - [0 -- 4]. We have implemented a version of the 2 TRR variants
-  out of the three major DRAM vendors (Samsung, SK Hynix and MICRON) based on
-  previous reverse-engineering techniques and also our own observations. This
-  is not a 1:1 implementation of the actual TRR as it is proprietary, however
-  we have tested for similar bitflips in same rows against real hardware.
-  Following are the four different `trr_variants`:
-  - 0: No TRR
-  - 1: A counter table-based TRR mechanism, which works on a per-bank basis.
-  - 2: A sampler-based TRR mechanism, which maintains a global refreshing
-       scheme.
-  - 3: Partially implemented another sampler-based TRR mechanism, which is not
-       verified.
-  - 4: PARA (Y. Kim et al.), one of the first RH mitigation mechanism, which
-       issues activates to rows with a probability P. This is hard-coded to
-       PARA-001 in the source.
-- `companion_table_length` - Inserting a row into the companion table is tricky IMO.
-  Therefore, I have used another small table, similar to the work called ProHIT (M. Son et al.).
-  A row is initially inserted into the companion table first.
-  Then, it is promoted to the counter table.
-  This is specific to the TRR variant, which uses counter tables.
-- `companion_threshold` - This is minimum number of activates required to make
-  an entry into the companion table. Understandably, the threshold for the
-  companion table is much lower than the actual TRR table (1024).
-- `trr_stat_dump` - This is a boolean value ot dump all the actions of the TRR
-  mechanism. One can set this to true to do a post-runtime analysis of
-  RowHammer and TRR.
-- `rh_stat_dump` - Similar to `trr_stat_dump`, you can also dump the stats of
-  the RowHammer triggers. This is helpful for post-runtime analysis.
-- `single_sided_prob` - The number of bitflips observed with a single-sided
-  RowHammer attack is much lower than a double-sided rowhammer attack. We saw
-  that this drop is 1e7 times less probable than a double-sided RowHammer
-  attack.
-- `half_double_prob` - Half-double (Google) is even more rare than a single
-  sided RowHammer attack. We could not reproduce this with our experimental
-  hardware setup. Therefore, we took this number from the Half-Double report.
-  We kept this probability at 1/1e9.
-
-## Understanding the code structure
-
-Change to gem5 in HammerSim is quite invasive, meaning that dram_interface was directly modified without adding new SimObjects.
-The justification is that this is a separate fork of gem5, that models hardware equivalent of a DRAM DIMM within the simulator.
-Since RowHammer is baked into the DIMM directly, we decided to make changes directly into the dram_interface.
-
-RowHammer is implemented using counters called `rhTriggers[row][4]` per row per bank.
-Each of these counters count the likelyhood of the neighboring rows getting triggered.
-Whenever there is an ACTIVATE for a row *r*, the `rhTriggers[row]` increment by 1.
-ACTIVATE is implemented in the method
-```cpp
-void
-DRAMInterface::activateBank(Rank& rank_ref, Bank& bank_ref,
-                       Tick act_tick, uint32_t row)
+}
 ```
-`rhTriggers` keeps a track of rows *r - 2*, *r - 1*, *r + 1* and *r + 2* using the four counter indices.
-Since ACTIVATING the row and then PRECHARGING the same row nullifies the likelyhood of a bit flip, the rhTriggers of rows *r - 2*, *r - 1*, *r + 1* and *r + 2* are updated with respect to row *r*.
 
-Whenever `rhTrigger[row][index]` crosses the `rowhammer_threshold` (defined via python), there is a non-zero probability of a bitflip on the same row `row`.
-There are four probability distributions to make this decision:
-1. Whether the given capacitor is weak (See RowHammer PUF [], FP-Rowhammer [] and FP-Hammer []). Prior research have shown that not every bit has the same probability of flipping. There are strong and weak cells. This information in HammerSim is captured via a variation map, provided as the `device_map`.
-2. The uniform probability of selecting a weak cell from a given set of weak cells.
-3. The uniform probability of selecting a double-sided or a single-sided bitflip.
-4. The uniform probability of causing a half-double bit flip.
+Keys are strings because they are JSON object keys. Columns must be valid byte
+offsets within the configured rank row buffer. Invalid values are ignored with
+a warning. Missing ranks, banks, or rows mean that no modeled weak column is
+available at that location.
 
-RowHammer is checked in the method:
-```cpp
-void
-DRAMInterface::checkRowHammer(Bank& bank_ref, MemPacket* mem_pkt)
+For small synthetic tests, any level may use the wildcard key `"*"`:
+
+```json
 {
-  // each of the four conditions of having a bitflip is checked here.
-}
-```
-
-This method `checkRowHammer()` is called after finishing a burst access to the DRAM:
-```cpp
-std::pair<Tick, Tick>
-DRAMInterface::doBurstAccess(MemPacket* mem_pkt, Tick next_burst_at,
-                             const std::vector<MemPacketQueue>& queue)
-```
-This makes sure to cause RowHammer bitflips if triggered in the current ACTIVATE.
-
-To make changes on how RowHammer behaves, start with `checkRowHammer()` method.
-This method automatically calls `doMemoryCorruption()` with the aggressor row address, and, victim locations.
-```cpp
-void
-DRAMInterface::doMemoryCorruption(MemPacket* mem_pkt, uint8_t bank,
-                uint32_t victim_row, uint16_t col, int distance) {
-```
-The correct victim location (victim row, column, and capacitor) is computed each time when a new bit is flipped, which makes data corruption an expensive feature.
-Currently, we only support DRAM address mapping with `ro` as the high bits and `co` as the low order bits.
-See how different mapping in gem5 work: [DRAM mappings in gem5](https://gem5-review.googlesource.com/c/public/gem5/+/51614/2/src/python/gem5/components/memory/ReadMe_MultiChannel_Memory.md).
-We'll support other memory mappings soon with multi-channeled memory.
-
-If you're using `rowhammer-test`, should be able to see your aggressor rows and victim rows correctly.
-
-### Data structures for writing a new RowHammer Mitigation
-
-HammerSim implements TRR using `trr_tables[TABLE_LENGTH][4 PARAMETERS]` to keep track of highly activated rows per bank.
-Each entry stores the rank, bank, row and a count of activates.
-Some TRR implementations are per rank.
-There are a lot of data structures that can be reused for keeping track of frequent aggressors.
-See `companion_table` for a multi-table TRR/mitigation method.
-
-In addition, there are `flagged_entries` to make sure the same capacitor cannot flip twice.
-Aggressors are deterministically tracked using `aggressor_rows`.
-
-### Adding a new RowHammer Mitigation
-
-Adding a new mitigation mechanism has to be done in the `dram_interface.cc` file.
-This is done in:
-```cpp
-// the sampler/counter mechanism is defined here.
-void
-DRAMInterface::activateBank(Rank& rank_ref, Bank& bank_ref,
-                       Tick act_tick, uint32_t row) {
-    ...
-    switch (trrVariant) {
-        ...
-        case N: {
-            // write a new mitigation mechanism here.
-        }
-        ...
+  "*": {
+    "*": {
+      "*": [0, 1, 2, 3]
     }
-    ...
-}
-
-// the inhibitor mechanism is implemented here. this is because the inhibitor
-// mechanism is triggers when the DRAM device is locked for refreshing.
-void
-DRAMInterface::Rank::processRefreshEvent() {
-    ...
-    switch(dram.trrVariant) {
-        ...
-        case N: {
-            // write the inhibitor mechanism here to keep DRAM timing
-            // consistent.
-        }
-        ...
-    }
-    ...
+  }
 }
 ```
 
-RowHammer bitflips are checked in the following function:
-```cpp
-void
-DRAMInterface::checkRowHammer(Bank& bank_ref, MemPacket* mem_pkt) {
-    ...
-}
-```
+`util/hammersim/synthetic-device-map.json` provides a ready-to-use wildcard
+map. Hardware-derived maps for Vendor B are in
+`util/hammersim/row_experiment_vendor_b/`. The large
+`prob-005.json.zip` archive must be decompressed before it can be supplied as
+`device_file`.
 
-#### Tutorial mitigation: TWICE tables
+HammerSim selects an unflipped weak column without mutating the device map.
+Writes make affected columns eligible again. The set of already-flipped
+columns is sparse, so enabling HammerSim no longer allocates a dense bitmap for
+every cell in memory.
 
-TWICE (E Lee et al.) is a good mitigation mechanism, easy to understand as a beginner to HammerSim.
-In this tutorial, we show how to add TWICE in HammerSim.
+## Disturbance and corruption behavior
 
-TWICE mathematically calculates the theoretical maximum number of aggressors possible during one tREFW.
-This is given by:
-$$ N = \frac{tREFW}{RowHammer Threshold \times tRC} $$
+Only ACT commands increase disturbance counters. Repeated column commands to
+an already-open row do not count as additional hammers. Reading or writing a
+victim row restores its modeled disturbance state.
 
-For a simple DDR4 DIMM, $N = 25$
-This can be further pruned via:
+At a threshold boundary, HammerSim classifies the opportunity as
+single-sided, double-sided, or Half-Double, applies the configured probability,
+and selects an available weak column from the device map. Functional
+corruption reconstructs the exact physical victim address from rank, bank,
+row, and byte column, including rank and channel interleaving. It then flips
+one randomly selected bit in that byte.
 
-To implement tracking of these many aggressors per bank, we first define the trrTableLength in the python class for the DIMM.
-```py
-class TwiceDIMM():
-    trr_table_length = N
-    # We'll define a unique trr_variant number for this mitigation
-    trr_variant = 10
-```
-We'll use the above trr\_variant to write our C++ changes.
-For this, we'll directly use `trrTable` that tracks rows with activate count.
+Functional corruption currently supports `RoRaBaChCo` and `RoRaBaCoCh`
+address mappings. Other address mappings remain usable when functional
+corruption is disabled.
 
-### Plating with error correcting codes (ECC)
+## TRR variants
 
-TODO
+The supported `trr_variant` values are:
 
-HammerSim models a **functional (not timing)** ECC to detect and correct RowHammered bitflips.
-We implement SECDED within a simplified interface.
-ECC bits are computed and stored for each DRAM write.
-Data is corrected if corrupt when read.
-Since this is expensive to simulate in gem5 for full-system configureations, we selectively keep track of data that is corrupted.
-If the user wants to simulate ECC, then at every data corruption, we track the original data for the ECC bits calculation.
-At the time of reading the same data, we compute and use the ECC bits to correct up to 1 bit and detect up to 2 bits error.
+- `0`: No TRR mitigation.
+- `1`: Vendor-A-style per-bank counter table with a companion admission
+  table.
+- `2`: Vendor-B-style sampled table with one rank-wide hottest-row
+  selection.
+- `4`: Experimental Vendor-A table without a companion table.
+- `5`: PARA, with a 1% probability of refreshing immediately adjacent rows
+  after each ACT.
+- `6`: Vendor-B-style sampled table with HammerSim's experimental masked-row
+  selection.
 
-## Using HammerSim
+Variant `3` is rejected because the previous implementation was incomplete.
+The vendor mechanisms are research approximations of proprietary hardware, not
+claims of exact vendor internals.
 
-There are pre-defined config scripts, that can be directly used with HammerSim.
-There are located in `configs/dram/rowhammer` directory.
-There are both traffic generators and also full system scripts.
-Note that the disk image path need to be replaced.
+TRR tables track rank, bank, row, and ACT count. Full tables replace the entry
+with the lowest count. Neighbor refreshes and periodic counter resets are
+bounds-checked for edge rows.
 
-### Synthetic Traffic via gem5's Traffic Generators
+## Functional ECC
 
-### Full-System Simulation
+HammerSim's ECC is functional rather than timing-accurate. When corruption
+first touches an aligned 64-bit word, HammerSim records the pristine word.
+On a later read:
 
-#### Creating Full-System RowHammer Workload
+- one differing bit is restored and counted as corrected;
+- two or more differing bits are counted as detected and left corrupted;
+- a clean word is removed from tracking.
 
-Testing was done using [Google's rowhammer-test](https://github.com/google/rowhammer-test).
-We ran one iteration of the hammering run for both single-sided and double-sided versions of RowHammer.
-`m5 exit` is dropped before starting the workload and `m5 exit` is dropped at the end of the iteration (with or without bitflips).
+Writes invalidate ECC tracking for every overlapping 64-bit word. This models
+the correction/detection outcome without adding ECC storage, encoding latency,
+or decoder timing to the DRAM protocol.
 
-To create the disk image, use:
+## Full-system configurations
+
+The full-system scripts no longer contain developer-specific host paths or a
+hard-coded sudo password. Pass the disk image explicitly and optionally
+override the kernel:
+
 ```sh
-git clone https://github.com/kaustav-goswami/gem5-resources.git
-cd gem5-resources
-git checkout rowhammer
-cd src/rowhammer-fs
-./build-x86.sh 22.04
+build/X86/gem5.opt \
+  configs/dram/rowhammer/FSConfigs/rowhammer-test/x86-rowhammer-with-kvm.py \
+  --disk-image /path/to/x86-ubuntu \
+  --kernel ~/.cache/gem5/x86-linux-kernel-5.4.49
 ```
 
-To build the same kernel that we used for the full system simulation:
-```sh
-wget https://www.kernel.org/pub/linux/kernel/v5.x/linux-5.4.49.tar.xz
-tar xvf linux-5.4.49.tar.xz
-cd linux-5.4.49.tar.xz
-menu config                                      # Use the default build
-make -j32
-```
-Alternately, you can also build the same kernel from `gem5-resources` repository.
+The same paths may be supplied through `HAMMERSIM_DISK_IMAGE` and
+`HAMMERSIM_KERNEL`. Use `--guest-command` if the workload is installed at a
+different path inside the disk image. The NPB configuration similarly accepts
+`--disk-image`, `--kernel`, and `--guest-npb-dir`.
 
-Use custom resource in gem5 to plug these artifacts.
-```py
-board.set_kernel_disk_workload(
-    # The x86 linux kernel will be automatically downloaded to the if not
-    # already present.
-    kernel=CustomResource(
-        os.path.join(
-            os.path.expanduser("~"), ".cache/gem5/x86-linux-kernel-5.4.49"
-        )
-    ),
-    # The x86 ubuntu image will be automatically downloaded to the if not
-    # already present.
-    disk_image=CustomDiskImageResource(
-        os.path.join(os.getcwd(),
-          "gem5-resources/src/rowhammer-fs/x86-disk-image-22-04/x86-ubuntu"),
-        root_partition="1"
-    ),
-    readfile_contents=" ".join(command),
-)
-```
+Synthetic traffic and full-system examples are under
+`configs/dram/rowhammer/`.
 
-Scripts to run `rowhammer-test` is located in `configs/dram/rowhammer/FSConfigs/rowhammer-test/x86-rowhammer-with-kvm.py` (and there is a no cache version).
+## Implementation map
 
-#### Reproducing results from the paper
+The main implementation is in:
 
-We simulated bit corruptions on two of the three major DRAM vendors.
-Hammering patterns on real systems were found using Blacksmith ().
-We then created gem5 traffic generators to replay the same RowHammer attack on gem5.
-Scripts to run these scripts can be found at `configs/dram/rowhammer/TrafficGen/vendor-*`.
+- `src/mem/DRAMInterface.py`: user-facing parameters;
+- `src/mem/dram_interface.hh` and `src/mem/dram_interface.cc`: disturbance,
+  TRR, corruption, and ECC behavior;
+- `src/mem/mem_interface.hh`: per-bank tracking state;
+- `src/mem/SConscript`: the JSON include path.
 
-TODO
-
-
-## More Information
-
-More on HammerSim can be found here: https://arch.cs.ucdavis.edu/memory/simulation/security/2023/03/20/yarch-hammersim.html
+New mitigation samplers belong in `DRAMInterface::activateBank`. Refresh-time
+inhibitors belong in `DRAMInterface::Rank::processRefreshEvent`.
+`DRAMInterface::checkRowHammer` contains bit-flip classification and
+selection, while `DRAMInterface::doMemoryCorruption` performs the backing
+memory mutation.

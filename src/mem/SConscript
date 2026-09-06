@@ -40,6 +40,8 @@
 
 Import('*')
 
+env.Append(CPPPATH=[Dir('#ext/json/json/include')])
+
 SimObject('CommMonitor.py', sim_objects=['CommMonitor'])
 Source('comm_monitor.cc')
 

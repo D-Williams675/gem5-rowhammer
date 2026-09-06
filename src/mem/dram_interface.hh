@@ -46,9 +46,12 @@
 #ifndef __DRAM_INTERFACE_HH__
 #define __DRAM_INTERFACE_HH__
 
-#include <random>
+#include <array>
 #include <cstddef>
 #include <cstdint>
+#include <unordered_map>
+
+#include <nlohmann/json.hpp>
 
 #include "mem/drampower.hh"
 #include "mem/mem_interface.hh"
@@ -539,13 +542,12 @@ class DRAMInterface : public MemInterface
     //AYAZ: Rowhammer activation threshold
     const uint32_t rowhammerThreshold;
 
+    const bool enableRowhammer;
+
     //AYAZ: the path to the device file with
     // the information on weak columns
     std::string deviceFile;
     nlohmann::json device_map;
-
-    // For the random number distributions
-
 
     //AYAZ: Rowhammer refresh counter
     int refreshCounter = 0;
@@ -566,35 +568,13 @@ class DRAMInterface : public MemInterface
 
     const bool enableMemoryCorruption;
 
-    const bool syntheticTraffic;
-
     // to implement ECC, there are a couple of parameters that the user needs
     // to specify
     const bool enableEcc;
-    const std::string pMatrixFileName;
     const int eccAlgorithm;
 
-    uint8_t* pMatrix;
-
-    // Extra data structures needed to enable ECC. The addresses are row
-    // aligned. however, we'll keep a track of the columns and the data depen
-    std::unordered_map<gem5::Addr, uint8_t*> ecc_victims;
-    std::unordered_map<gem5::Addr, uint16_t> ecc_columns;
-
-    // We cannot use simple timing based seed and need a high quality random
-    // distribution to simulate the uniform probabilities
-    std::uniform_int_distribution<uint64_t> hd_distribution;
-    std::uniform_int_distribution<uint64_t> single_sided_distribution;
-    std::uniform_int_distribution<uint64_t> double_sided_distribution;
-    std::uniform_int_distribution<uint64_t> another_distribution;
-
-
-    // // std::random_device rd;
-    std::mt19937_64 generator;
-    static std::mt19937_64 seedEngine_() {
-        std::random_device rd;
-        return std::mt19937_64{ static_cast<std::mt19937_64::result_type>(rd()) };
-    }
+    using EccWord = std::array<uint8_t, 8>;
+    std::unordered_map<gem5::Addr, EccWord> eccVictims;
 
 
     uint64_t num_trr_refreshes = 0;
@@ -655,7 +635,18 @@ class DRAMInterface : public MemInterface
      * Corrupt victim rows using this method
      */
     void doMemoryCorruption(MemPacket* mem_pkt, uint8_t bank, uint32_t row,
-                                    uint16_t col, int distance);
+                            uint32_t col, int distance);
+
+    Addr dramAddress(uint8_t rank, uint8_t bank, uint32_t row,
+                     uint32_t byte_offset) const;
+    bool chooseWeakColumn(const MemPacket* mem_pkt, const Bank& bank,
+                          uint32_t victim_row, uint32_t& column);
+    bool shouldFlip(uint64_t denominator);
+    void handleEccRead(const MemPacket* mem_pkt);
+    void handleWrite(const MemPacket* mem_pkt, Bank& bank);
+    void resetVictimDisturbance(Bank& bank, uint32_t victim_row);
+    void refreshNeighbors(Bank& bank, uint32_t aggressor_row,
+                          unsigned int radius);
 
 
     /**

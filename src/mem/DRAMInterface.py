@@ -38,7 +38,6 @@
 # (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-import os
 from m5.objects.MemCtrl import MemCtrl
 from m5.objects.MemInterface import *
 
@@ -54,13 +53,14 @@ class DRAMInterface(MemInterface):
     cxx_header = "mem/dram_interface.hh"
     cxx_class = "gem5::memory::DRAMInterface"
 
-    # All the rowhammer parameters are defined at the start of the
-    # DRAMInterface class. The default device file is used in case it is not
-    # provided by the user.
+    # RowHammer is opt-in so an ordinary gem5 DRAM interface does not allocate
+    # tracking tables or require a device map.
+    enable_rowhammer = Param.Bool(False, "Enable HammerSim RowHammer modeling")
+
     device_file = Param.String(
-        os.path.join(os.getcwd(), "util/hammersim/prob-005.json"),
-        "Absolute path with the device info file."
-        "The default file is included in the repo.",
+        "",
+        "Path to an uncompressed JSON device map (required when RowHammer is "
+        "enabled).",
     )
 
     # This number is 50K for DDR4 and around 139K for DDR3
@@ -75,8 +75,9 @@ class DRAMInterface(MemInterface):
         "maintains.",
     )
 
-    # TRR variants must be within 0 to 3. No TRR, Vendors A, B and C
-    trr_variant = Param.Unsigned(0, "The different variant of TRR (0 - 3)")
+    # Supported values: 0 (none), 1/4 (Vendor A approximations), 2/6
+    # (Vendor B approximations), and 5 (PARA).
+    trr_variant = Param.Unsigned(0, "HammerSim TRR variant")
 
     # TRR threshold is a lower number than rowhammer_threshold. This must be a
     # preemptive number which prevents filpping bits in the DRAM rows due to a
@@ -148,22 +149,17 @@ class DRAMInterface(MemInterface):
         "Set this to True enable memory corruption"
     )
 
-    # Traffic generators create too many bitflips once rhTriggers is reached
+    # Retained so existing HammerSim configurations remain compatible.
     synthetic_traffic = Param.Bool(
         False,
-        "Set this to true when using traffic generator"
+        "Deprecated compatibility option; threshold handling is workload "
+        "independent",
     )
 
     # To enable ECC, the usr eneeds to specify a boolean
     enable_ecc = Param.Bool(
         False,
         "Set this to true to enable functional ECC for data correction"
-    )
-
-    # pMatrix
-    p_matrix = Param.String(
-        "NULL",
-        "Specify a path to the pMatrix required to compute the ECC bits"
     )
 
     # ECC Algorithm. We want to have a string where the user specifies

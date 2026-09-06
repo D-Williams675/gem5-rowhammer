@@ -1,0 +1,63 @@
+name: HammerSim CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: hammersim-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-smoke-test:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential libboost-all-dev libhdf5-dev libpng-dev \
+            libprotobuf-dev pkg-config protobuf-compiler python3-dev \
+            python3-pip zlib1g-dev
+          python3 -m pip install --user scons
+
+      - name: Validate Python and device maps
+        run: |
+          python3 -m compileall -q configs util
+          python3 -m json.tool util/hammersim/synthetic-device-map.json \
+            >/dev/null
+
+      - name: Build gem5
+        run: ~/.local/bin/scons --ignore-style build/NULL/gem5.opt -j2
+
+      - name: Run stock DRAM smoke test
+        run: |
+          build/NULL/gem5.opt --outdir=m5out-stock \
+            configs/dram/rowhammer/TrafficGen/test-scripts/simple_dram.py
+
+      - name: Run HammerSim corruption and ECC smoke test
+        run: |
+          build/NULL/gem5.opt --outdir=m5out-hammersim \
+            configs/dram/rowhammer/TrafficGen/hammersim_smoke.py
+          grep -Eq 'rowHammerTotalBitflips[[:space:]]+1([[:space:]]|$)' \
+            m5out-hammersim/stats.txt
+          grep -Eq 'rowHammerCorruptedBitCount[[:space:]]+1([[:space:]]|$)' \
+            m5out-hammersim/stats.txt
+          grep -Eq 'rowHammerEccCorrected[[:space:]]+1([[:space:]]|$)' \
+            m5out-hammersim/stats.txt
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hammersim-ci-logs
+          path: |
+            build/NULL/scons_config.log
+            m5out-stock/
+            m5out-hammersim/

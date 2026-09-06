@@ -110,6 +110,7 @@ def get_data_chunk(row_number, width=8):
 
 from m5.objects import *
 import m5
+import os
 
 duration = int(1e11)
 
@@ -117,6 +118,10 @@ duration = int(1e11)
 # `decode-dimms`.
 class Vendor_A_1R_x8(DDR4_2400_8x8):
 
+    enable_rowhammer = True
+    device_file = os.path.join(
+        os.getcwd(), "util/hammersim/synthetic-device-map.json"
+    )
     ranks_per_channel = 1
     trr_variant = 1
 

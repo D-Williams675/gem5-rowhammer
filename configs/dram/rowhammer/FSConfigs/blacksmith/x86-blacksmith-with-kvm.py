@@ -40,6 +40,7 @@ scons build/X86/gem5.opt
 ```
 """
 
+import argparse
 import os
 from gem5.resources.resource import CustomResource, CustomDiskImageResource
 from gem5.utils.requires import requires
@@ -57,6 +58,33 @@ from gem5.simulate.simulator import Simulator
 from gem5.simulate.exit_event import ExitEvent
 
 from gem5.utils.override import overrides
+
+
+parser = argparse.ArgumentParser(
+    description="Run a full-system RowHammer workload with HammerSim."
+)
+parser.add_argument(
+    "--kernel",
+    default=os.environ.get(
+        "HAMMERSIM_KERNEL",
+        os.path.expanduser("~/.cache/gem5/x86-linux-kernel-5.4.49"),
+    ),
+    help="Path to the x86 kernel (or set HAMMERSIM_KERNEL).",
+)
+parser.add_argument(
+    "--disk-image",
+    default=os.environ.get("HAMMERSIM_DISK_IMAGE"),
+    help="Path to the RowHammer disk image (or set HAMMERSIM_DISK_IMAGE).",
+)
+parser.add_argument(
+    "--guest-command",
+    default="/home/gem5/rowhammer-test/rowhammer_test;",
+    help="Command to execute inside the guest.",
+)
+args = parser.parse_args()
+if not args.disk_image:
+    parser.error("--disk-image or HAMMERSIM_DISK_IMAGE is required")
+
 
 class Myboard(X86Board):
 
@@ -102,6 +130,10 @@ cache_hierarchy = PrivateL1PrivateL2CacheHierarchy(
 
 # Setup the system memory.
 memory = SingleChannelDDR3_1600(size="3GB")
+memory._dram_class.enable_rowhammer = True
+memory._dram_class.device_file = os.path.join(
+    os.getcwd(), "util/hammersim/synthetic-device-map.json"
+)
 memory._dram_class.trr_variant = 0
 
 memory._dram_class.ranks_per_channel = 1
@@ -141,8 +173,7 @@ board = Myboard(
 # then, again, call `m5 exit` to terminate the simulation. After simulation
 # has ended you may inspect `m5out/system.pc.com_1.device` to see the echo
 # output.
-command = ["echo rowhammer_test;",
-        "echo 12345 | sudo -S /home/gem5/rowhammer-test/rowhammer_test;"]
+command = ["echo rowhammer_test;", args.guest_command]
 
 # "rowhammer_test"
 # + "echo 'This is running on Timing CPU cores.';" \
@@ -152,16 +183,11 @@ command = ["echo rowhammer_test;",
 board.set_kernel_disk_workload(
     # The x86 linux kernel will be automatically downloaded to the if not
     # already present.
-    kernel=CustomResource(
-        # os.path.join(
-            "/home/kaustavg/kernel/x86/linux-6.9.9/vmlinux"
-            # os.path.expanduser("~"), ".cache/gem5/x86-linux-kernel-5.4.49"
-        # )
-    ),
+    kernel=CustomResource(args.kernel),
     # The x86 ubuntu image will be automatically downloaded to the if not
     # already present.
     disk_image=CustomDiskImageResource(
-        os.path.join("/home/kaustavg/projects/kg-resources/src/rowhammer-fs/x86-disk-image-22-04/x86-ubuntu"),
+        args.disk_image,
         root_partition="1"
     ),
     readfile_contents=" ".join(command),
