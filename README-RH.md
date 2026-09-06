@@ -29,19 +29,21 @@ configurations. Build `X86` for the full-system configurations.
 
 ## Quick verification
 
-The deterministic smoke test performs three aggressor ACTs, functionally flips
-one bit in the victim row, reads the victim, and corrects the bit through the
-simplified SECDED model:
+The deterministic smoke test exercises single-sided, double-sided, and
+Half-Double disturbance, functionally flips one bit in each of three victim
+rows, reads the victims, and corrects the bits through the simplified SECDED
+model:
 
 ```sh
 build/NULL/gem5.opt --outdir=m5out-hammersim \
   configs/dram/rowhammer/TrafficGen/hammersim_smoke.py
 ```
 
-The resulting `stats.txt` should report one total bit flip, one functionally
-corrupted bit, and one ECC correction. The `HammerSim CI` GitHub workflow
-builds gem5 and checks these values automatically. It also runs a stock DRAM
-configuration with HammerSim disabled.
+The resulting `stats.txt` should report three total bit flips (one of each
+modeled attack class), three functionally corrupted bits, and three ECC
+corrections. The `HammerSim CI` GitHub workflow builds gem5 and checks these
+values automatically. It also runs a stock DRAM configuration with HammerSim
+disabled.
 
 ## Configuration
 
@@ -71,10 +73,14 @@ Important parameters:
   of exactly 1/1000 at each corresponding opportunity. HammerSim uses gem5's
   seeded random-number generator, so simulations respect gem5's reproducible
   random seed.
+- `half_double_activation_threshold`: Far-aggressor ACT count between modeled
+  Half-Double opportunities (default: 1000).
 - `enable_memory_corruption`: Applies selected bit flips to gem5's backing
   memory. It requires `enable_rowhammer=True`.
 - `enable_ecc`: Enables simplified functional SECDED. It requires functional
   corruption and `ecc_algorithm=1`.
+- `trr_stat_dump` / `trr_stat_file`: Record each modeled TRR or PARA neighbor
+  refresh as tick, rank, bank, aggressor row, radius, and neighbor count.
 - `synthetic_traffic`: Retained for configuration compatibility. Probability
   opportunities are now consistently evaluated at threshold boundaries for
   all workload types.
@@ -196,8 +202,21 @@ build/X86/gem5.opt \
 
 The same paths may be supplied through `HAMMERSIM_DISK_IMAGE` and
 `HAMMERSIM_KERNEL`. Use `--guest-command` if the workload is installed at a
-different path inside the disk image. The NPB configuration similarly accepts
-`--disk-image`, `--kernel`, and `--guest-npb-dir`.
+different path inside the disk image. The Blacksmith configuration requires
+`--guest-command` or `HAMMERSIM_GUEST_COMMAND` because its installation path and
+arguments are workload-specific. These scripts boot with KVM, switch to timing
+cores at the first guest `m5 exit`, and finish at the second. The NPB
+configuration similarly accepts `--disk-image`, `--kernel`, and
+`--guest-npb-dir`. Its two-stage flow uses `--take-checkpoint true` to stop at
+the NPB work-begin event and create a checkpoint, then
+`--take-checkpoint false --checkpoint-path ... --cpu-type timing|o3` to restore
+that checkpoint and collect ROI statistics. Set `HAMMERSIM_NPB_CHECKPOINT` to
+share the path between invocations. The restore stage does not require KVM.
+
+The scripts under `FSConfigs/test-scripts` are parameterized as well:
+`x86-rowhammer-fs.py` requires a disk image, and the SE-mode
+`x86-rowhammer-test.py` requires `--binary` rather than referring to an
+untracked local executable.
 
 Synthetic traffic and full-system examples are under
 `configs/dram/rowhammer/`.

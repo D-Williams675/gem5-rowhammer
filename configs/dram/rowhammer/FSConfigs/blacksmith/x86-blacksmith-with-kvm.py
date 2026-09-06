@@ -52,8 +52,6 @@ from gem5.components.processors.simple_switchable_processor import (
 )
 from gem5.components.processors.cpu_types import CPUTypes
 from gem5.isas import ISA
-from gem5.coherence_protocol import CoherenceProtocol
-from gem5.resources.resource import Resource
 from gem5.simulate.simulator import Simulator
 from gem5.simulate.exit_event import ExitEvent
 
@@ -78,12 +76,19 @@ parser.add_argument(
 )
 parser.add_argument(
     "--guest-command",
-    default="/home/gem5/rowhammer-test/rowhammer_test;",
-    help="Command to execute inside the guest.",
+    default=os.environ.get("HAMMERSIM_GUEST_COMMAND"),
+    help="Blacksmith command inside the guest (or set HAMMERSIM_GUEST_COMMAND).",
+)
+parser.add_argument(
+    "--root-partition",
+    default=os.environ.get("HAMMERSIM_ROOT_PARTITION", "2"),
+    help="Root partition number inside the disk image (default: 2).",
 )
 args = parser.parse_args()
 if not args.disk_image:
     parser.error("--disk-image or HAMMERSIM_DISK_IMAGE is required")
+if not args.guest_command:
+    parser.error("--guest-command or HAMMERSIM_GUEST_COMMAND is required")
 
 
 class Myboard(X86Board):
@@ -107,7 +112,7 @@ class Myboard(X86Board):
             "earlyprintk=ttyS0",
             "console=ttyS0",
             "lpj=7999923",
-            "root=/dev/sda2",
+            "root={root_value}",
             "disk_device={disk_device}",
             # "default_hugepagesz=2M",
             # "hugepagesz=2M",
@@ -173,12 +178,7 @@ board = Myboard(
 # then, again, call `m5 exit` to terminate the simulation. After simulation
 # has ended you may inspect `m5out/system.pc.com_1.device` to see the echo
 # output.
-command = ["echo rowhammer_test;", args.guest_command]
-
-# "rowhammer_test"
-# + "echo 'This is running on Timing CPU cores.';" \
-# + "sleep 1;"
-# + "m5 exit;"
+command = f"m5 exit; echo blacksmith; {args.guest_command}; m5 exit;"
 
 board.set_kernel_disk_workload(
     # The x86 linux kernel will be automatically downloaded to the if not
@@ -188,10 +188,17 @@ board.set_kernel_disk_workload(
     # already present.
     disk_image=CustomDiskImageResource(
         args.disk_image,
-        root_partition="1"
+        root_partition=args.root_partition,
     ),
-    readfile_contents=" ".join(command),
+    readfile_contents=command,
 )
+
+
+def switch_then_exit():
+    processor.switch()
+    yield False
+    yield True
+
 
 simulator = Simulator(
     board=board,
@@ -200,11 +207,7 @@ simulator = Simulator(
         # exit event. Instead of exiting the simulator, we just want to
         # switch the processor. The 2nd m5 exit after will revert to using
         # default behavior where the simulator run will exit.
-        # ExitEvent.EXIT: (func() for func in [processor.switch]),
+        ExitEvent.EXIT: switch_then_exit(),
     },
 )
-simulator.run()
-simulator.run()
-simulator.run()
-# processor.switch()
 simulator.run()

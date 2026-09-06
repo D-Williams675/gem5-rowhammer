@@ -29,8 +29,9 @@ jobs:
       - name: Validate Python and device maps
         run: |
           python3 -m compileall -q configs util
-          python3 -m json.tool util/hammersim/synthetic-device-map.json \
-            >/dev/null
+          for map in util/hammersim/*-device-map.json; do
+            python3 -m json.tool "$map" >/dev/null
+          done
 
       - name: Build gem5
         run: |
@@ -48,11 +49,17 @@ jobs:
         run: |
           build/NULL/gem5.opt --outdir=m5out-hammersim \
             configs/dram/rowhammer/TrafficGen/hammersim_smoke.py
-          grep -Eq 'rowHammerTotalBitflips[[:space:]]+1([[:space:]]|$)' \
+          grep -Eq 'rowHammerTotalBitflips[[:space:]]+3([[:space:]]|$)' \
             m5out-hammersim/stats.txt
-          grep -Eq 'rowHammerCorruptedBitCount[[:space:]]+1([[:space:]]|$)' \
+          grep -Eq 'rowHammerSingleSidedBitflips[[:space:]]+1([[:space:]]|$)' \
             m5out-hammersim/stats.txt
-          grep -Eq 'rowHammerEccCorrected[[:space:]]+1([[:space:]]|$)' \
+          grep -Eq 'rowHammerDoubleSidedBitflips[[:space:]]+1([[:space:]]|$)' \
+            m5out-hammersim/stats.txt
+          grep -Eq 'rowHammerHalfDoubleBitflips[[:space:]]+1([[:space:]]|$)' \
+            m5out-hammersim/stats.txt
+          grep -Eq 'rowHammerCorruptedBitCount[[:space:]]+3([[:space:]]|$)' \
+            m5out-hammersim/stats.txt
+          grep -Eq 'rowHammerEccCorrected[[:space:]]+3([[:space:]]|$)' \
             m5out-hammersim/stats.txt
 
       - name: Upload logs on failure

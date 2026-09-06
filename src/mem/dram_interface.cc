@@ -206,6 +206,16 @@ DRAMInterface::handleEccRead(const MemPacket* mem_pkt)
 
     const Addr first_word = mem_pkt->addr & ~Addr(7);
     const Addr last_word = (mem_pkt->addr + mem_pkt->size - 1) & ~Addr(7);
+    auto clear_flagged_word = [&](Addr word) {
+        Bank& bank = ranks[mem_pkt->rank]->banks[mem_pkt->bank];
+        const uint32_t first_column = getCtrlAddr(word) % rowBufferSize;
+        for (uint32_t byte = 0;
+             byte < 8 && first_column + byte < rowBufferSize; ++byte) {
+            const uint64_t cell = static_cast<uint64_t>(mem_pkt->row) *
+                rowBufferSize + first_column + byte;
+            bank.flaggedCells.erase(cell);
+        }
+    };
     for (Addr word = first_word; word <= last_word; word += 8) {
         const auto victim = eccVictims.find(word);
         if (victim == eccVictims.end())
@@ -222,9 +232,11 @@ DRAMInterface::handleEccRead(const MemPacket* mem_pkt)
         }
 
         if (differing_bits == 0) {
+            clear_flagged_word(word);
             eccVictims.erase(victim);
         } else if (differing_bits == 1) {
             std::memcpy(current, victim->second.data(), victim->second.size());
+            clear_flagged_word(word);
             stats.rowHammerEccCorrected++;
             DPRINTF(ECC, "SECDED corrected one bit in word %#x\n", word);
             eccVictims.erase(victim);
@@ -369,14 +381,15 @@ DRAMInterface::checkRowHammer(Bank& bank_ref, MemPacket* mem_pkt)
     // check for half double only if the current row is 2 or higher as there
     // cannot be a half-double if the row is 1.
     if (mem_pkt->row >= 2 ) {
+        const uint64_t far_activations =
+            bank_ref.rhTriggers[mem_pkt->row][1];
         if (bank_ref.rhTriggers[mem_pkt->row - 1][1] >= 1 &&
-                bank_ref.rhTriggers[mem_pkt->row][1] >= 1000) {
+                bank_ref.rhTriggers[mem_pkt->row][0] >= 1 &&
+                far_activations % halfDoubleActivationThreshold == 0) {
             // half-double is rare. so we have to adjust the probability by a
             // very large factor.
 
-            const uint64_t triggers = bank_ref.rhTriggers[mem_pkt->row][1];
-            const bool opportunity = triggers % 1000 == 0;
-            bool bitflip = opportunity && shouldFlip(halfDoubleProb);
+            bool bitflip = shouldFlip(halfDoubleProb);
             uint32_t col = 0;
             if (bitflip && !chooseWeakColumn(
                     mem_pkt, bank_ref, mem_pkt->row - 2, col)) {
@@ -405,15 +418,16 @@ DRAMInterface::checkRowHammer(Bank& bank_ref, MemPacket* mem_pkt)
     }
 
     if (mem_pkt->row <= rowsPerBank - 3) {
+        const uint64_t far_activations =
+            bank_ref.rhTriggers[mem_pkt->row][2];
         if (bank_ref.rhTriggers[mem_pkt->row + 1][2] >= 1 &&
-                bank_ref.rhTriggers[mem_pkt->row][2] >= 1000) {
+                bank_ref.rhTriggers[mem_pkt->row][3] >= 1 &&
+                far_activations % halfDoubleActivationThreshold == 0) {
 
             // half-double is rare. so we have to adjust the probability by a
             // very large factor.
             // flip bit here
-            const uint64_t triggers = bank_ref.rhTriggers[mem_pkt->row][2];
-            const bool opportunity = triggers % 1000 == 0;
-            bool bitflip = opportunity && shouldFlip(halfDoubleProb);
+            bool bitflip = shouldFlip(halfDoubleProb);
             uint32_t col = 0;
             if (bitflip && !chooseWeakColumn(
                     mem_pkt, bank_ref, mem_pkt->row + 2, col)) {
@@ -445,28 +459,21 @@ DRAMInterface::checkRowHammer(Bank& bank_ref, MemPacket* mem_pkt)
 
     bool single_sided = true, bitflip_status = false;
 
-    if (bank_ref.rhTriggers[mem_pkt->row][1]  >= rowhammerThreshold) {
+    const uint64_t lower_opposite = mem_pkt->row >= 2 ?
+        bank_ref.rhTriggers[mem_pkt->row - 2][2] : 0;
+    const uint64_t lower_disturbance =
+        bank_ref.rhTriggers[mem_pkt->row][1] + lower_opposite;
+
+    if (lower_disturbance >= rowhammerThreshold) {
         // this is a compound probability factor with a tunable parameter
         // for double rowhammer attacks
 
-        // check the ndb of the this row:
-        // we dont know that the value of N is in an N-sided attack. so we
-        // only have to see whether (a) this row is a part of an N sided
-        // attack.
-        // we expect that the number of activates of the edge rows is similar.
-        // in order to not let this slip, we keep a difference variable called
-        // delta. the user can set this value.
-        // check this->row is an aggressor row and then check for its neighbors
-        // this row can only be sandwiched if its > 1.
-        if (mem_pkt->row >= 2) {
-            if (bank_ref.aggressor_rows[mem_pkt->row]>=rowhammerThreshold/2 &&
-                bank_ref.aggressor_rows[mem_pkt->row-2]>=rowhammerThreshold/2){
-                    single_sided = false;
-            }
-        }
+        // The victim's disturbance is the sum of activations from both
+        // adjacent aggressors. If the opposite aggressor contributed, this is
+        // a double-sided opportunity.
+        single_sided = lower_opposite == 0;
 
-        const uint64_t triggers = bank_ref.rhTriggers[mem_pkt->row][1];
-        const bool eligible = triggers % rowhammerThreshold == 0;
+        const bool eligible = lower_disturbance % rowhammerThreshold == 0;
         bitflip_status = eligible && shouldFlip(single_sided ?
                               singleSidedProb : doubleSidedProb);
 
@@ -512,31 +519,20 @@ DRAMInterface::checkRowHammer(Bank& bank_ref, MemPacket* mem_pkt)
 
     single_sided = true;
     bitflip_status = false;
-    if (bank_ref.rhTriggers[mem_pkt->row][2]  >= rowhammerThreshold) {
+    const uint64_t upper_opposite = mem_pkt->row + 2 < rowsPerBank ?
+        bank_ref.rhTriggers[mem_pkt->row + 2][1] : 0;
+    const uint64_t upper_disturbance =
+        bank_ref.rhTriggers[mem_pkt->row][2] + upper_opposite;
+
+    if (upper_disturbance >= rowhammerThreshold) {
 
         // this is a compound probability factor with a tunable parameter
         // for double rowhammer attacks
 
-        // check the ndb of the this row:
-        // we dont know that the value of N is in an N-sided attack. so we
-        // only have to see whether (a) this row is a part of an N sided
-        // attack.
-        // we expect that the number of activates of the edge rows is similar.
-        // in order to not let this slip, we keep a difference variable called
-        // delta. the user can set this value.
+        // Include activations from the aggressor on the victim's other side.
+        single_sided = upper_opposite == 0;
 
-        // check this->row is an aggressor row and then check for its neighbors
-        if (mem_pkt->row <= rowsPerBank - 3) {
-            if (bank_ref.aggressor_rows[mem_pkt->row] >=
-                    rowhammerThreshold/2 &&
-                    bank_ref.aggressor_rows[mem_pkt->row + 2] >=
-                    rowhammerThreshold/2) {
-                single_sided = false;
-            }
-        }
-
-        const uint64_t triggers = bank_ref.rhTriggers[mem_pkt->row][2];
-        const bool eligible = triggers % rowhammerThreshold == 0;
+        const bool eligible = upper_disturbance % rowhammerThreshold == 0;
         bitflip_status = eligible && shouldFlip(single_sided ?
                               singleSidedProb : doubleSidedProb);
 
@@ -619,15 +615,17 @@ DRAMInterface::updateVictims(Bank& bank_ref, uint32_t row)
 
     // Index 1/2 track the immediately lower/higher victim respectively.
     // Index 0/3 track the same directions at distance two and advance once
-    // per 1024 nearby activations, matching the Half-Double approximation.
+    // once per configured far-aggressor activation threshold.
     if (row > 0) {
         const uint64_t lower_count = ++bank_ref.rhTriggers[row][1];
-        if (row >= 2 && lower_count % 1024 == 0)
+        if (row >= 2 &&
+                lower_count % halfDoubleActivationThreshold == 0)
             bank_ref.rhTriggers[row][0]++;
     }
     if (row + 1 < rowsPerBank) {
         const uint64_t upper_count = ++bank_ref.rhTriggers[row][2];
-        if (row + 2 < rowsPerBank && upper_count % 1024 == 0)
+        if (row + 2 < rowsPerBank &&
+                upper_count % halfDoubleActivationThreshold == 0)
             bank_ref.rhTriggers[row][3]++;
     }
 }
@@ -664,13 +662,23 @@ DRAMInterface::activateBank(Rank& rank_ref, Bank& bank_ref,
             outfile.close();
         }
 
+        if (trrStatDump) {
+            std::ofstream outfile(
+                trrStatFile, std::ios::out | std::ios::trunc);
+            if (!outfile) {
+                warn("Unable to initialize HammerSim TRR trace '%s'",
+                     trrStatFile);
+            } else {
+                outfile << "# tick rank bank aggressor radius neighbors\n";
+            }
+        }
+
     }
     DPRINTF(DRAM, "Activate at tick %d\n", act_at);
 
     if (enableRowhammer) {
         // Track only ACT commands. Column commands to an open row do not
         // constitute additional hammers.
-        bank_ref.aggressor_rows[row]++;
         if (std::find(bank_ref.activated_row_list.begin(),
                       bank_ref.activated_row_list.end(), row) ==
                 bank_ref.activated_row_list.end()) {
@@ -789,6 +797,17 @@ DRAMInterface::activateBank(Rank& rank_ref, Bank& bank_ref,
                         "%u bank %u row %u (total %llu)\n",
                         neighbors, rank_ref.rank, bank_ref.bank, row,
                         para_refreshes);
+                if (trrStatDump) {
+                    std::ofstream output(
+                        trrStatFile, std::ios::out | std::ios::app);
+                    if (output) {
+                        output << curTick() << " "
+                               << static_cast<unsigned int>(rank_ref.rank)
+                               << " "
+                               << static_cast<unsigned int>(bank_ref.bank)
+                               << " " << row << " 1 " << neighbors << "\n";
+                    }
+                }
             }
             break;
           case 6: {
@@ -1311,10 +1330,13 @@ DRAMInterface::DRAMInterface(const DRAMInterfaceParams &_p)
       trrThreshold(_p.trr_threshold),
       companionTableLength(_p.companion_table_length),
       companionThreshold(_p.companion_threshold),
+      trrStatDump(_p.trr_stat_dump),
+      trrStatFile(_p.trr_stat_file),
       rhStatDump(_p.rh_stat_dump),
       rhStatFile(_p.rh_stat_file),
       singleSidedProb(_p.single_sided_prob),
       halfDoubleProb(_p.half_double_prob),
+      halfDoubleActivationThreshold(_p.half_double_activation_threshold),
       doubleSidedProb(_p.double_sided_prob),
       enableMemoryCorruption(_p.enable_memory_corruption),
       enableEcc(_p.enable_ecc),
@@ -1380,7 +1402,8 @@ DRAMInterface::DRAMInterface(const DRAMInterfaceParams &_p)
         fatal_if(deviceFile.empty(),
                  "enable_rowhammer requires an uncompressed device_file");
         fatal_if(rowhammerThreshold == 0 || singleSidedProb == 0 ||
-                 doubleSidedProb == 0 || halfDoubleProb == 0,
+                 doubleSidedProb == 0 || halfDoubleProb == 0 ||
+                 halfDoubleActivationThreshold == 0,
                  "RowHammer thresholds and probability denominators must be "
                  "non-zero");
         fatal_if(trrVariant == 3 || trrVariant > 6,
@@ -1391,8 +1414,14 @@ DRAMInterface::DRAMInterface(const DRAMInterfaceParams &_p)
                  counterTableLength == 0,
                  "The selected TRR variant requires a non-empty counter "
                  "table");
+        fatal_if((trrVariant == 1 || trrVariant == 2 ||
+                  trrVariant == 4 || trrVariant == 6) &&
+                 trrThreshold == 0,
+                 "The selected TRR variant requires a non-zero threshold");
         fatal_if(trrVariant == 1 && companionTableLength == 0,
                  "TRR variant 1 requires a non-empty companion table");
+        fatal_if(trrVariant == 1 && companionThreshold == 0,
+                 "TRR variant 1 requires a non-zero companion threshold");
         fatal_if(enableMemoryCorruption &&
                  addrMapping != enums::RoRaBaChCo &&
                  addrMapping != enums::RoRaBaCoCh,
@@ -1415,7 +1444,6 @@ DRAMInterface::DRAMInterface(const DRAMInterfaceParams &_p)
         for (auto& rank : ranks) {
             for (auto& bank : rank->banks) {
                 bank.rhTriggers.resize(rowsPerBank);
-                bank.aggressor_rows.assign(rowsPerBank, 0);
                 bank.trr_table.assign(
                     counterTableLength, std::vector<uint64_t>(4, 0));
                 bank.companion_table.assign(
@@ -1849,7 +1877,8 @@ DRAMInterface::Rank::Rank(const DRAMInterfaceParams &_p,
                          int _rank, DRAMInterface& _dram)
     : EventManager(&_dram), dram(_dram),
       pwrStateTrans(PWR_IDLE), pwrStatePostRefresh(PWR_IDLE),
-      pwrStateTick(0), refreshDueAt(0), pwrState(PWR_IDLE),
+      pwrStateTick(0), refreshDueAt(0), rowHammerRefreshCounter(0),
+      pwrState(PWR_IDLE),
       refreshState(REF_IDLE), inLowPowerState(false), rank(_rank),
       readEntries(0), writeEntries(0), outstandingEvents(0),
       wakeUpAllowedAt(0), power(_p, false), banks(_p.banks_per_rank),
@@ -2174,7 +2203,7 @@ DRAMInterface::Rank::processRefreshEvent()
 
 
         if (dram.enableRowhammer) {
-            ++dram.refreshCounter;
+            ++rowHammerRefreshCounter;
 
             auto refresh_entry = [&](Bank& bank, uint32_t index,
                                      unsigned int radius) {
@@ -2191,10 +2220,21 @@ DRAMInterface::Rank::processRefreshEvent()
                         "%u bank %u row %u (total %llu)\n",
                         neighbors, rank, bank.bank, aggressor,
                         dram.num_trr_refreshes);
+                if (dram.trrStatDump) {
+                    std::ofstream output(
+                        dram.trrStatFile, std::ios::out | std::ios::app);
+                    if (output) {
+                        output << curTick() << " "
+                               << static_cast<unsigned int>(rank) << " "
+                               << static_cast<unsigned int>(bank.bank) << " "
+                               << aggressor << " " << radius << " "
+                               << neighbors << "\n";
+                    }
+                }
             };
 
             if ((dram.trrVariant == 1 || dram.trrVariant == 4) &&
-                dram.refreshCounter % 9 == 0) {
+                rowHammerRefreshCounter % 9 == 0) {
                 // Vendor A selects the hottest tracked row independently in
                 // each bank and refreshes the two rows on either side.
                 for (auto& bank : banks) {
@@ -2211,8 +2251,8 @@ DRAMInterface::Rank::processRefreshEvent()
                         refresh_entry(bank, hottest, 2);
                 }
             } else if ((dram.trrVariant == 2 || dram.trrVariant == 6) &&
-                       (dram.refreshCounter % 2 == 0 ||
-                        dram.refreshCounter % 9 == 0)) {
+                       (rowHammerRefreshCounter % 2 == 0 ||
+                        rowHammerRefreshCounter % 9 == 0)) {
                 // Vendor B selects the single hottest tracked row across the
                 // rank and refreshes two neighboring rows on each side.
                 Bank* hottest_bank = nullptr;
@@ -2234,10 +2274,10 @@ DRAMInterface::Rank::processRefreshEvent()
 
             const bool full_refresh =
                 ((dram.trrVariant == 1 || dram.trrVariant == 4) &&
-                 dram.refreshCounter % 4096 == 0) ||
+                 rowHammerRefreshCounter % 4096 == 0) ||
                 ((dram.trrVariant == 0 || dram.trrVariant == 2 ||
                   dram.trrVariant == 5 || dram.trrVariant == 6) &&
-                 dram.refreshCounter % 8192 == 0);
+                  rowHammerRefreshCounter % 8192 == 0);
 
             if (full_refresh) {
                 if (dram.trrVariant == 0 && dram.rhStatDump) {
@@ -2265,8 +2305,6 @@ DRAMInterface::Rank::processRefreshEvent()
                 for (auto& bank : banks) {
                     for (auto& trigger : bank.rhTriggers)
                         trigger.fill(0);
-                    std::fill(bank.aggressor_rows.begin(),
-                              bank.aggressor_rows.end(), 0);
                     for (auto& entry : bank.trr_table)
                         entry[3] = 0;
                     for (auto& entry : bank.companion_table)

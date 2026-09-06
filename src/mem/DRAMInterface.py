@@ -106,7 +106,10 @@ class DRAMInterface(MemInterface):
     # triggers. This can be used for post-simulation analysis.
     trr_stat_dump = Param.Bool(
         False,
-        "Set this to True to dump TRR triggers" "and generate a TRR trace.",
+        "Set this to True to dump TRR triggers and generate a TRR trace.",
+    )
+    trr_stat_file = Param.String(
+        "m5out/trr.trace", "output path of the TRR trace"
     )
 
     # This is similar to trr_stat_dump.
@@ -135,6 +138,10 @@ class DRAMInterface(MemInterface):
         "Number of half-double RH "
         "attacks required before observing "
         "at least 1 single-sided bitflip.",
+    )
+    half_double_activation_threshold = Param.Unsigned(
+        1000,
+        "Far-aggressor ACTs required for one Half-Double opportunity",
     )
 
     double_sided_prob = Param.UInt64(

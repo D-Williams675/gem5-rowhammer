@@ -36,12 +36,14 @@ Usage
 
 ```
 scons build/X86/gem5.opt
-./build/X86/gem5.opt configs/example/gem5_library/x86-ubuntu-run-with-kvm.py
+./build/X86/gem5.opt \
+  configs/dram/rowhammer/FSConfigs/test-scripts/x86-rowhammer-fs.py \
+  --disk-image /path/to/x86-ubuntu
 ```
 """
+import argparse
 import os
 
-from numpy import partition
 from gem5.utils.requires import requires
 from gem5.components.boards.x86_board import X86Board
 from gem5.components.memory.single_channel import SingleChannelDDR3_1600
@@ -50,16 +52,36 @@ from gem5.components.processors.simple_switchable_processor import (
 )
 from gem5.components.processors.cpu_types import CPUTypes
 from gem5.isas import ISA
-from gem5.coherence_protocol import CoherenceProtocol
-from gem5.resources.resource import *
+from gem5.resources.resource import CustomDiskImageResource, CustomResource
 from gem5.simulate.simulator import Simulator
 from gem5.simulate.exit_event import ExitEvent
+
+parser = argparse.ArgumentParser(description="Run a HammerSim full-system smoke test.")
+parser.add_argument(
+    "--kernel",
+    default=os.environ.get(
+        "HAMMERSIM_KERNEL",
+        os.path.expanduser("~/.cache/gem5/x86-linux-kernel-5.4.49"),
+    ),
+)
+parser.add_argument(
+    "--disk-image", default=os.environ.get("HAMMERSIM_DISK_IMAGE")
+)
+parser.add_argument(
+    "--guest-command", default="echo 'HammerSim timing cores are active'"
+)
+parser.add_argument(
+    "--root-partition",
+    default=os.environ.get("HAMMERSIM_ROOT_PARTITION", "1"),
+)
+args = parser.parse_args()
+if not args.disk_image:
+    parser.error("--disk-image or HAMMERSIM_DISK_IMAGE is required")
 
 # This runs a check to ensure the gem5 binary is compiled to X86 and to the
 # MESI Two Level coherence protocol.
 requires(
     isa_required=ISA.X86,
-    coherence_protocol_required=CoherenceProtocol.MESI_TWO_LEVEL,
     kvm_required=True,
 )
 
@@ -76,6 +98,11 @@ cache_hierarchy = PrivateL1PrivateL2CacheHierarchy(
 
 # Setup the system memory.
 memory = SingleChannelDDR3_1600(size="3GB")
+memory._dram_class.enable_rowhammer = True
+memory._dram_class.device_file = os.path.join(
+    os.getcwd(), "util/hammersim/synthetic-device-map.json"
+)
+memory._dram_class.trr_variant = 0
 
 # Here we setup the processor. This is a special switchable processor in which
 # a starting core type and a switch core type must be specified. Once a
@@ -87,6 +114,7 @@ processor = SimpleSwitchableProcessor(
     starting_core_type=CPUTypes.KVM,
     switch_core_type=CPUTypes.TIMING,
     num_cores=2,
+    isa=ISA.X86,
 )
 
 # Here we setup the board. The X86Board allows for Full-System X86 simulations.
@@ -108,27 +136,28 @@ board = X86Board(
 # has ended you may inspect `m5out/system.pc.com_1.device` to see the echo
 # output.
 command = (
-    "m5 exit;" + "echo 'This is running on Timing CPU cores.';" + "sleep 1;"
+    f"m5 exit; {args.guest_command}; m5 exit;"
 )
 
 board.set_kernel_disk_workload(
     # The x86 linux kernel will be automatically downloaded to the if not
     # already present.
-    kernel=CustomResource(
-        os.path.join(
-            os.path.expanduser("~"), ".cache/gem5/x86-linux-kernel-5.4.49"
-        )
-    ),
+    kernel=CustomResource(args.kernel),
     # The x86 ubuntu image will be automatically downloaded to the if not
     # already present.
     disk_image=CustomDiskImageResource(
-        os.path.join(
-            os.path.expanduser("~"), ".cache/gem5/x86-ubuntu-18.04-img"
-        ),
-        disk_root_partition="1",
+        args.disk_image,
+        root_partition=args.root_partition,
     ),
     readfile_contents=command,
 )
+
+
+def switch_then_exit():
+    processor.switch()
+    yield False
+    yield True
+
 
 simulator = Simulator(
     board=board,
@@ -137,8 +166,7 @@ simulator = Simulator(
         # exit event. Instead of exiting the simulator, we just want to
         # switch the processor. The 2nd m5 exit after will revert to using
         # default behavior where the simulator run will exit.
-        ExitEvent.EXIT: (func() for func in [processor.switch]),
+        ExitEvent.EXIT: switch_then_exit(),
     },
 )
-simulator.run()
 simulator.run()

@@ -19,13 +19,14 @@ from m5.objects import (
 class HammerSimDRAM(DDR4_2400_8x8):
     enable_rowhammer = True
     device_file = os.path.join(
-        os.getcwd(), "util/hammersim/synthetic-device-map.json"
+        os.getcwd(), "util/hammersim/smoke-device-map.json"
     )
     ranks_per_channel = 1
     rowhammer_threshold = 3
     single_sided_prob = 1
     double_sided_prob = 1
-    half_double_prob = int(1e9)
+    half_double_prob = 1
+    half_double_activation_threshold = 3
     enable_memory_corruption = True
     enable_ecc = True
     ecc_algorithm = 1
@@ -46,20 +47,41 @@ system.mem_ctrl.port = system.membus.mem_side_ports
 
 
 def traffic(generator):
-    # DDR4_2400_8x8 has an 8 KiB rank row buffer and 16 banks. These
-    # addresses therefore select rows 1, 4, and 2 of bank 0 respectively.
+    # DDR4_2400_8x8 has an 8 KiB rank row buffer and 16 banks. Multiples of
+    # this stride therefore select rows in bank 0.
     row_stride = 8 * 1024 * 16
-    aggressor = row_stride
-    separator_one = row_stride * 4
-    separator_two = row_stride * 5
-    victim = row_stride * 2
+    single_aggressor = row_stride
+    single_victim = row_stride * 2
+    first_double_aggressor = row_stride * 5
+    double_victim = row_stride * 6
+    second_double_aggressor = row_stride * 7
+    half_double_victim = row_stride * 13
+    half_double_relay = row_stride * 14
+    half_double_far_aggressor = row_stride * 15
 
+    # Three ACTs to row 1 produce one single-sided flip in vulnerable row 2.
     for address in (
-        aggressor,
-        separator_one,
-        aggressor,
-        separator_two,
-        aggressor,
+        single_aggressor,
+        row_stride * 8,
+        single_aggressor,
+        row_stride * 9,
+        single_aggressor,
+        single_victim,
+        # Rows 5 and 7 jointly contribute three ACTs to vulnerable row 6.
+        first_double_aggressor,
+        row_stride * 11,
+        second_double_aggressor,
+        row_stride * 12,
+        second_double_aggressor,
+        double_victim,
+        # A relay ACT and three far-aggressor ACTs exercise Half-Double.
+        half_double_relay,
+        half_double_far_aggressor,
+        row_stride * 20,
+        half_double_far_aggressor,
+        row_stride * 21,
+        half_double_far_aggressor,
+        half_double_victim,
     ):
         yield generator.createLinear(
             100000,
@@ -72,18 +94,6 @@ def traffic(generator):
             64,
         )
 
-    # The third aggressor ACT deterministically flips one victim bit. Reading
-    # the victim exercises the functional SECDED correction path.
-    yield generator.createLinear(
-        100000,
-        victim,
-        victim + 64,
-        64,
-        1000,
-        1000,
-        100,
-        64,
-    )
     yield generator.createExit(0)
 
 

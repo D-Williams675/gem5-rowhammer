@@ -266,6 +266,9 @@ class DRAMInterface : public MemInterface
          */
         Tick refreshDueAt;
 
+        /** Number of completed refreshes for this rank's HammerSim state. */
+        uint64_t rowHammerRefreshCounter;
+
         /**
          * Function to update Power Stats
          */
@@ -549,9 +552,6 @@ class DRAMInterface : public MemInterface
     std::string deviceFile;
     nlohmann::json device_map;
 
-    //AYAZ: Rowhammer refresh counter
-    int refreshCounter = 0;
-
     // kg: changes here
     const uint32_t counterTableLength;
     const uint32_t trrVariant;
@@ -559,11 +559,14 @@ class DRAMInterface : public MemInterface
     const uint32_t companionTableLength;
     const uint32_t companionThreshold;
 
+    const bool trrStatDump;
+    std::string trrStatFile;
     const bool rhStatDump;
     std::string rhStatFile;
 
     const uint64_t singleSidedProb;
     const uint64_t halfDoubleProb;
+    const uint32_t halfDoubleActivationThreshold;
     const uint64_t doubleSidedProb;
 
     const bool enableMemoryCorruption;

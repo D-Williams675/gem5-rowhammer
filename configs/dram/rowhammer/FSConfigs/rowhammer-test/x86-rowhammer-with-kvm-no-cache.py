@@ -44,19 +44,15 @@ import os
 from gem5.resources.resource import CustomResource, CustomDiskImageResource
 from gem5.utils.requires import requires
 from gem5.components.boards.x86_board import X86Board
-from gem5.components.boards.kernel_disk_workload import KernelDiskWorkload
 from gem5.components.memory.single_channel import SingleChannelDDR3_1600
 from gem5.components.processors.simple_switchable_processor import (
     SimpleSwitchableProcessor,
 )
 from gem5.components.processors.cpu_types import CPUTypes
 from gem5.isas import ISA
-from gem5.coherence_protocol import CoherenceProtocol
-from gem5.resources.resource import Resource
 from gem5.simulate.simulator import Simulator
 from gem5.simulate.exit_event import ExitEvent
 
-from gem5.utils.override import overrides
 import argparse
 
 parser = argparse.ArgumentParser(
@@ -91,35 +87,15 @@ parser.add_argument(
     default="/home/gem5/rowhammer-test/rowhammer_test;",
     help="Command to execute inside the guest.",
 )
+parser.add_argument(
+    "--root-partition",
+    default=os.environ.get("HAMMERSIM_ROOT_PARTITION", "2"),
+    help="Root partition number inside the disk image (default: 2).",
+)
 
 args = parser.parse_args()
 if not args.disk_image:
     parser.error("--disk-image or HAMMERSIM_DISK_IMAGE is required")
-
-class Myboard(X86Board):
-
-    def __init__(
-        self,
-        clk_freq: str,
-        processor,
-        memory,
-        cache_hierarchy,
-    ) -> None:
-        super().__init__(
-            clk_freq=clk_freq,
-            processor=processor,
-            memory=memory,
-            cache_hierarchy=cache_hierarchy,
-        )
-    @overrides(KernelDiskWorkload)
-    def get_default_kernel_args(self):
-        return [
-            "earlyprintk=ttyS0",
-            "console=ttyS0",
-            "lpj=7999923",
-            "root=/dev/hda2",
-            "disk_device={disk_device}",
-        ]
 
 # This runs a check to ensure the gem5 binary is compiled to X86 and to the
 # MESI Two Level coherence protocol.
@@ -162,7 +138,7 @@ processor = SimpleSwitchableProcessor(
 )
 
 # Here we setup the board. The X86Board allows for Full-System X86 simulations.
-board = Myboard(
+board = X86Board(
     clk_freq="3GHz",
     processor=processor,
     memory=memory,
@@ -179,12 +155,7 @@ board = Myboard(
 # then, again, call `m5 exit` to terminate the simulation. After simulation
 # has ended you may inspect `m5out/system.pc.com_1.device` to see the echo
 # output.
-command = ["echo rowhammer_test;", args.guest_command]
-
-# "rowhammer_test"
-# + "echo 'This is running on Timing CPU cores.';" \
-# + "sleep 1;"
-# + "m5 exit;"
+command = f"m5 exit; echo rowhammer_test; {args.guest_command}; m5 exit;"
 
 board.set_kernel_disk_workload(
     # The x86 linux kernel will be automatically downloaded to the if not
@@ -194,10 +165,17 @@ board.set_kernel_disk_workload(
     # already present.
     disk_image=CustomDiskImageResource(
         args.disk_image,
-        root_partition="1"
+        root_partition=args.root_partition,
     ),
-    readfile_contents=" ".join(command),
+    readfile_contents=command,
 )
+
+
+def switch_then_exit():
+    processor.switch()
+    yield False
+    yield True
+
 
 simulator = Simulator(
     board=board,
@@ -206,11 +184,7 @@ simulator = Simulator(
         # exit event. Instead of exiting the simulator, we just want to
         # switch the processor. The 2nd m5 exit after will revert to using
         # default behavior where the simulator run will exit.
-        # ExitEvent.EXIT: (func() for func in [processor.switch]),
+        ExitEvent.EXIT: switch_then_exit(),
     },
 )
-simulator.run()
-simulator.run()
-simulator.run()
-processor.switch()
 simulator.run()

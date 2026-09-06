@@ -36,11 +36,14 @@ Usage
 -----
 
 ```
-scons build/ARM/gem5.opt
-./build/ARM/gem5.opt configs/gem5_library/arm-hello.py
+scons build/X86/gem5.opt
+./build/X86/gem5.opt \
+  configs/dram/rowhammer/FSConfigs/test-scripts/x86-rowhammer-test.py \
+  --binary /path/to/x86-rowhammer-workload
 ```
 """
 
+import argparse
 import os
 from gem5.isas import ISA
 from gem5.utils.requires import requires
@@ -52,7 +55,15 @@ from gem5.components.cachehierarchies.classic.no_cache import NoCache
 from gem5.components.processors.simple_processor import SimpleProcessor
 from gem5.simulate.simulator import Simulator
 
-# This check ensures the gem5 binary is compiled to the ARM ISA target. If not,
+parser = argparse.ArgumentParser(
+    description="Run an x86 SE-mode workload against HammerSim."
+)
+parser.add_argument("--binary", required=True, help="Path to an x86 workload.")
+args = parser.parse_args()
+if not os.path.isfile(args.binary):
+    parser.error(f"workload does not exist: {args.binary}")
+
+# This check ensures the gem5 binary is compiled to the x86 ISA target. If not,
 # an exception will be thrown.
 requires(isa_required=ISA.X86)
 
@@ -61,9 +72,16 @@ cache_hierarchy = NoCache()
 
 # We use a single channel DDR3_1600 memory system
 memory = SingleChannelDDR3_1600(size="1GB")
+memory._dram_class.enable_rowhammer = True
+memory._dram_class.device_file = os.path.join(
+    os.getcwd(), "util/hammersim/synthetic-device-map.json"
+)
+memory._dram_class.trr_variant = 0
 
 # We use a simple Timing processor with one core.
-processor = SimpleProcessor(cpu_type=CPUTypes.TIMING, num_cores=1)
+processor = SimpleProcessor(
+    cpu_type=CPUTypes.TIMING, num_cores=1, isa=ISA.X86
+)
 
 # The gem5 library simble board which can be used to run simple SE-mode
 # simulations.
@@ -74,22 +92,9 @@ board = SimpleBoard(
     cache_hierarchy=cache_hierarchy,
 )
 
-# Here we set the workload. In this case we want to run a simple "Hello World!"
-# program compiled to the ARM ISA. The `Resource` class will automatically
-# download the binary from the gem5 Resources cloud bucket if it's not already
-# present.
+# Run the caller-supplied x86 RowHammer workload.
 board.set_se_binary_workload(
-    # The `Resource` class reads the `resources.json` file from the gem5
-    # resources repository:
-    # https://gem5.googlesource.com/public/gem5-resource.
-    # Any resource specified in this file will be automatically retrieved.
-    # At the time of writing, this file is a WIP and does not contain all
-    # resources. Jira ticket: https://gem5.atlassian.net/browse/GEM5-1096
-    CustomResource(
-        os.path.join(
-            os.getcwd(), "tests/test-progs/rowhammer/sequential_v2"
-        )  # rowhammer_test")
-    )
+    CustomResource(os.path.abspath(args.binary))
 )
 
 # Lastly we run the simulation.
