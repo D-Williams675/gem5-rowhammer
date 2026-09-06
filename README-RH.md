@@ -25,25 +25,28 @@ git submodule update --init --recursive
 ```
 
 The `NULL` build is sufficient for the synthetic traffic-generator
-configurations. Build `X86` for the full-system configurations.
+configurations. Build `X86` for the full-system configurations; CI uses the
+X86 binary for both the regression and HammerSim smoke tests.
 
 ## Quick verification
 
 The deterministic smoke test exercises single-sided, double-sided, and
-Half-Double disturbance, functionally flips one bit in each of three victim
-rows, reads the victims, and corrects the bits through the simplified SECDED
-model:
+Half-Double disturbance. It also verifies that SECDED-corrected cells can flip
+again and that two corrupt bits in one codeword are detected but not silently
+corrected:
 
 ```sh
 build/NULL/gem5.opt --outdir=m5out-hammersim \
   configs/dram/rowhammer/TrafficGen/hammersim_smoke.py
 ```
 
-The resulting `stats.txt` should report three total bit flips (one of each
-modeled attack class), three functionally corrupted bits, and three ECC
-corrections. The `HammerSim CI` GitHub workflow builds gem5 and checks these
-values automatically. It also runs a stock DRAM configuration with HammerSim
-disabled.
+The resulting `stats.txt` should report six total/functionally applied bit
+flips (four single-sided, one double-sided, and one Half-Double), four ECC
+corrections, and one detected double-bit codeword. The `HammerSim CI` GitHub
+workflow builds gem5 and checks these values automatically. It also runs a
+stock DRAM configuration with HammerSim disabled, exercises all five supported
+TRR/PARA variants, and verifies that the intentionally unsupported variant 3
+is rejected.
 
 ## Configuration
 
@@ -75,6 +78,8 @@ Important parameters:
   random seed.
 - `half_double_activation_threshold`: Far-aggressor ACT count between modeled
   Half-Double opportunities (default: 1000).
+- `para_probability_denominator`: PARA neighbor-refresh probability
+  denominator per ACT (default: 100, or 1%).
 - `enable_memory_corruption`: Applies selected bit flips to gem5's backing
   memory. It requires `enable_rowhammer=True`.
 - `enable_ecc`: Enables simplified functional SECDED. It requires functional
@@ -128,6 +133,13 @@ map. Hardware-derived maps for Vendor B are in
 `prob-005.json.zip` archive must be decompressed before it can be supplied as
 `device_file`.
 
+Validate one or more maps before a run with:
+
+```sh
+python3 util/hammersim/validate_device_map.py \
+  --row-buffer-size 8192 path/to/device-map.json
+```
+
 HammerSim selects an unflipped weak column without mutating the device map.
 Writes make affected columns eligible again. The set of already-flipped
 columns is sparse, so enabling HammerSim no longer allocates a dense bitmap for
@@ -160,8 +172,8 @@ The supported `trr_variant` values are:
 - `2`: Vendor-B-style sampled table with one rank-wide hottest-row
   selection.
 - `4`: Experimental Vendor-A table without a companion table.
-- `5`: PARA, with a 1% probability of refreshing immediately adjacent rows
-  after each ACT.
+- `5`: PARA, with a configurable probability (1% by default) of refreshing
+  immediately adjacent rows after each ACT.
 - `6`: Vendor-B-style sampled table with HammerSim's experimental masked-row
   selection.
 
@@ -208,7 +220,7 @@ arguments are workload-specific. These scripts boot with KVM, switch to timing
 cores at the first guest `m5 exit`, and finish at the second. The NPB
 configuration similarly accepts `--disk-image`, `--kernel`, and
 `--guest-npb-dir`. Its two-stage flow uses `--take-checkpoint true` to stop at
-the NPB work-begin event and create a checkpoint, then
+the pre-benchmark guest `m5 exit` and create a checkpoint, then
 `--take-checkpoint false --checkpoint-path ... --cpu-type timing|o3` to restore
 that checkpoint and collect ROI statistics. Set `HAMMERSIM_NPB_CHECKPOINT` to
 share the path between invocations. The restore stage does not require KVM.

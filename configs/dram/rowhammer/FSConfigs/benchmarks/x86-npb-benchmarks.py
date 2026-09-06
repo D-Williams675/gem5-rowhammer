@@ -39,9 +39,10 @@ Usage:
 ```
 scons build/X86/gem5.opt
 ./build/X86/gem5.opt \
-    configs/example/gem5_library/x86-npb-benchmarks.py \
+    configs/dram/rowhammer/FSConfigs/benchmarks/x86-npb-benchmarks.py \
     --benchmark <benchmark_name> \
-    --size <benchmark_class>
+    --size <benchmark_class> \
+    --take-checkpoint <true|false>
 ```
 """
 import os
@@ -60,6 +61,7 @@ from gem5.components.processors.cpu_types import CPUTypes
 from gem5.isas import ISA
 from gem5.coherence_protocol import CoherenceProtocol
 from gem5.resources.resource import CustomResource, CustomDiskImageResource
+from gem5.simulate.exit_event import ExitEvent
 from m5.util import warn
 
 # Following are the list of benchmark programs for npb.
@@ -260,7 +262,8 @@ board = X86Board(
 # properly.
 
 command = (
-    f"{args.guest_npb_dir}/{args.benchmark}.{args.size}.x;"
+    "m5 exit;"
+    + f"{args.guest_npb_dir}/{args.benchmark}.{args.size}.x;"
     + "sleep 5;"
     + "m5 exit;"
 )
@@ -292,6 +295,11 @@ if take_checkpoint:
     m5.instantiate()
     board._post_instantiate()
     exit_event = m5.simulate()
+    if "m5_exit" not in exit_event.getCause():
+        raise RuntimeError(
+            "Expected the pre-benchmark m5 exit before checkpointing, got: "
+            f"{exit_event.getCause()}"
+        )
     print(
         f"Checkpointing @ tick {m5.curTick()} because "
         f"{exit_event.getCause()}"
@@ -305,13 +313,44 @@ else:
         )
     m5.instantiate(checkpoint_path)
     board._post_instantiate()
-    m5.stats.reset()
-    start_tick = m5.curTick()
-    global_start = time.time()
-    exit_event = m5.simulate(args.ticks if args.ticks else m5.MaxTick)
+    roi_start_tick = None
+    roi_start_wall = None
+
+    while True:
+        max_ticks = (
+            args.ticks
+            if roi_start_tick is not None and args.ticks
+            else m5.MaxTick
+        )
+        exit_event = m5.simulate(max_ticks)
+        exit_type = ExitEvent.translate_exit_status(exit_event.getCause())
+
+        if exit_type == ExitEvent.WORKBEGIN:
+            if roi_start_tick is not None:
+                raise RuntimeError("NPB emitted a second work-begin event")
+            roi_start_tick = m5.curTick()
+            roi_start_wall = time.time()
+            m5.stats.reset()
+            continue
+
+        if exit_type == ExitEvent.WORKEND:
+            if roi_start_tick is None:
+                raise RuntimeError("NPB emitted work-end before work-begin")
+            break
+
+        if exit_type in (ExitEvent.MAX_TICK, ExitEvent.SCHEDULED_TICK):
+            if roi_start_tick is None:
+                raise RuntimeError("Simulation limit reached before NPB ROI")
+            break
+
+        raise RuntimeError(
+            "Expected NPB work-begin/work-end events, got: "
+            f"{exit_event.getCause()}"
+        )
+
     m5.stats.dump()
-    elapsed_ticks = m5.curTick() - start_tick
-    elapsed_wall = time.time() - global_start
+    elapsed_ticks = m5.curTick() - roi_start_tick
+    elapsed_wall = time.time() - roi_start_wall
     print(
         f"Stopped @ tick {m5.curTick()} because {exit_event.getCause()}; "
         f"ROI ticks: {elapsed_ticks}; wall time: {elapsed_wall:.2f}s"

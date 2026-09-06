@@ -556,6 +556,7 @@ class DRAMInterface : public MemInterface
     const uint32_t counterTableLength;
     const uint32_t trrVariant;
     const uint32_t trrThreshold;
+    const uint64_t paraProbabilityDenominator;
     const uint32_t companionTableLength;
     const uint32_t companionThreshold;
 

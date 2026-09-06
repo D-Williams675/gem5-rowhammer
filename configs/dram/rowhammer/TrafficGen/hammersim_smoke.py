@@ -58,6 +58,8 @@ def traffic(generator):
     half_double_victim = row_stride * 13
     half_double_relay = row_stride * 14
     half_double_far_aggressor = row_stride * 15
+    double_bit_victim = row_stride * 25
+    double_bit_aggressor = row_stride * 24
 
     # Three ACTs to row 1 produce one single-sided flip in vulnerable row 2.
     for address in (
@@ -65,6 +67,13 @@ def traffic(generator):
         row_stride * 8,
         single_aggressor,
         row_stride * 9,
+        single_aggressor,
+        single_victim,
+        # ECC correction makes the weak cell eligible to flip again.
+        single_aggressor,
+        row_stride * 10,
+        single_aggressor,
+        row_stride * 11,
         single_aggressor,
         single_victim,
         # Rows 5 and 7 jointly contribute three ACTs to vulnerable row 6.
@@ -82,6 +91,20 @@ def traffic(generator):
         row_stride * 21,
         half_double_far_aggressor,
         half_double_victim,
+        # Two threshold crossings flip separate bytes in one ECC word. The
+        # final read must detect, but not correct, the double-bit error.
+        double_bit_aggressor,
+        row_stride * 30,
+        double_bit_aggressor,
+        row_stride * 31,
+        double_bit_aggressor,
+        row_stride * 32,
+        double_bit_aggressor,
+        row_stride * 30,
+        double_bit_aggressor,
+        row_stride * 31,
+        double_bit_aggressor,
+        double_bit_victim,
     ):
         yield generator.createLinear(
             100000,

@@ -87,6 +87,11 @@ class DRAMInterface(MemInterface):
         "The threshold number used to " "refresh rows in the DRAM device.",
     )
 
+    para_probability_denominator = Param.UInt64(
+        100,
+        "PARA neighbor-refresh probability denominator per ACT",
+    )
+
     # I have used a companion table to implement TRR A as there was no source
     # materials on how a new row is inserted into the TRR table for vendor A.
     companion_table_length = Param.Unsigned(

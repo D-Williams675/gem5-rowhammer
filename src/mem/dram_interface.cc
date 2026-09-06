@@ -194,8 +194,11 @@ DRAMInterface::handleWrite(const MemPacket* mem_pkt, Bank& bank)
 
     const Addr first_word = mem_pkt->addr & ~Addr(7);
     const Addr last_word = (mem_pkt->addr + mem_pkt->size - 1) & ~Addr(7);
-    for (Addr word = first_word; word <= last_word; word += 8)
+    for (Addr word = first_word;; word += 8) {
         eccVictims.erase(word);
+        if (word == last_word)
+            break;
+    }
 }
 
 void
@@ -216,35 +219,37 @@ DRAMInterface::handleEccRead(const MemPacket* mem_pkt)
             bank.flaggedCells.erase(cell);
         }
     };
-    for (Addr word = first_word; word <= last_word; word += 8) {
+    for (Addr word = first_word;; word += 8) {
         const auto victim = eccVictims.find(word);
-        if (victim == eccVictims.end())
-            continue;
+        if (victim != eccVictims.end()) {
+            uint8_t* current = toHostAddr(word);
+            unsigned int differing_bits = 0;
+            for (size_t byte = 0; byte < victim->second.size(); ++byte) {
+                uint8_t difference = current[byte] ^ victim->second[byte];
+                while (difference) {
+                    differing_bits += difference & 1;
+                    difference >>= 1;
+                }
+            }
 
-        uint8_t* current = toHostAddr(word);
-        unsigned int differing_bits = 0;
-        for (size_t byte = 0; byte < victim->second.size(); ++byte) {
-            uint8_t difference = current[byte] ^ victim->second[byte];
-            while (difference) {
-                differing_bits += difference & 1;
-                difference >>= 1;
+            if (differing_bits == 0) {
+                clear_flagged_word(word);
+                eccVictims.erase(victim);
+            } else if (differing_bits == 1) {
+                std::memcpy(
+                    current, victim->second.data(), victim->second.size());
+                clear_flagged_word(word);
+                stats.rowHammerEccCorrected++;
+                DPRINTF(ECC, "SECDED corrected one bit in word %#x\n", word);
+                eccVictims.erase(victim);
+            } else {
+                stats.rowHammerEccDetected++;
+                DPRINTF(ECC, "SECDED detected %u corrupt bits in word %#x\n",
+                        differing_bits, word);
             }
         }
-
-        if (differing_bits == 0) {
-            clear_flagged_word(word);
-            eccVictims.erase(victim);
-        } else if (differing_bits == 1) {
-            std::memcpy(current, victim->second.data(), victim->second.size());
-            clear_flagged_word(word);
-            stats.rowHammerEccCorrected++;
-            DPRINTF(ECC, "SECDED corrected one bit in word %#x\n", word);
-            eccVictims.erase(victim);
-        } else {
-            stats.rowHammerEccDetected++;
-            DPRINTF(ECC, "SECDED detected %u corrupt bits in word %#x\n",
-                    differing_bits, word);
-        }
+        if (word == last_word)
+            break;
     }
 }
 
@@ -587,8 +592,9 @@ DRAMInterface::doMemoryCorruption(MemPacket* mem_pkt, uint8_t bank,
              victim_row, mem_pkt->row, distance);
 
     const Addr addr = dramAddress(mem_pkt->rank, bank, victim_row, col);
+    fatal_if(!pmemAddr,
+             "Functional HammerSim corruption requires backing memory");
     uint8_t* host_addr = toHostAddr(addr);
-    fatal_if(!host_addr, "No backing memory for HammerSim address %#x", addr);
 
     if (enableEcc && eccAlgorithm == 1) {
         const Addr word_addr = addr & ~Addr(7);
@@ -679,9 +685,12 @@ DRAMInterface::activateBank(Rank& rank_ref, Bank& bank_ref,
     if (enableRowhammer) {
         // Track only ACT commands. Column commands to an open row do not
         // constitute additional hammers.
-        if (std::find(bank_ref.activated_row_list.begin(),
-                      bank_ref.activated_row_list.end(), row) ==
-                bank_ref.activated_row_list.end()) {
+        updateVictims(bank_ref, row);
+
+        if (rhStatDump &&
+                std::find(bank_ref.activated_row_list.begin(),
+                          bank_ref.activated_row_list.end(), row) ==
+                    bank_ref.activated_row_list.end()) {
             bank_ref.activated_row_list.push_back(row);
         }
 
@@ -756,8 +765,9 @@ DRAMInterface::activateBank(Rank& rank_ref, Bank& bank_ref,
                 }
                 bank_ref.companion_table[companion_index] = {
                     rank_ref.rank, bank_ref.bank, row, 1};
-            } else if (bank_ref.companion_table[companion_index][3] >=
-                       companionThreshold) {
+            }
+            if (bank_ref.companion_table[companion_index][3] >=
+                    companionThreshold) {
                 track_row();
                 bank_ref.companion_table[companion_index][3] = 0;
             }
@@ -784,8 +794,8 @@ DRAMInterface::activateBank(Rank& rank_ref, Bank& bank_ref,
             break;
           case 5:
             // PARA refreshes both immediately adjacent rows with probability
-            // 1/100 after each ACT.
-            if (shouldFlip(100)) {
+            // 1/paraProbabilityDenominator after each ACT.
+            if (shouldFlip(paraProbabilityDenominator)) {
                 stats.rowHammerSamplerTriggers++;
                 stats.rowHammerInhibitorTriggers++;
                 const uint64_t neighbors =
@@ -828,9 +838,6 @@ DRAMInterface::activateBank(Rank& rank_ref, Bank& bank_ref,
     // update the open row
     assert(bank_ref.openRow == Bank::NO_ROW);
     bank_ref.openRow = row;
-
-    if (enableRowhammer)
-        updateVictims(bank_ref, row);
 
     // start counting anew, this covers both the case when we
     // auto-precharged, and when this access is forced to
@@ -1328,6 +1335,7 @@ DRAMInterface::DRAMInterface(const DRAMInterfaceParams &_p)
       counterTableLength(_p.counter_table_length),
       trrVariant(_p.trr_variant),
       trrThreshold(_p.trr_threshold),
+      paraProbabilityDenominator(_p.para_probability_denominator),
       companionTableLength(_p.companion_table_length),
       companionThreshold(_p.companion_threshold),
       trrStatDump(_p.trr_stat_dump),
@@ -1387,6 +1395,8 @@ DRAMInterface::DRAMInterface(const DRAMInterfaceParams &_p)
 
     fatal_if(enableMemoryCorruption && !enableRowhammer,
              "enable_memory_corruption requires enable_rowhammer");
+    fatal_if(enableMemoryCorruption && _p.null,
+             "enable_memory_corruption requires non-null backing memory");
     fatal_if(enableEcc && !enableRowhammer,
              "enable_ecc requires enable_rowhammer");
     fatal_if(enableEcc && !enableMemoryCorruption,
@@ -1422,6 +1432,8 @@ DRAMInterface::DRAMInterface(const DRAMInterfaceParams &_p)
                  "TRR variant 1 requires a non-empty companion table");
         fatal_if(trrVariant == 1 && companionThreshold == 0,
                  "TRR variant 1 requires a non-zero companion threshold");
+        fatal_if(trrVariant == 5 && paraProbabilityDenominator == 0,
+                 "PARA requires a non-zero probability denominator");
         fatal_if(enableMemoryCorruption &&
                  addrMapping != enums::RoRaBaChCo &&
                  addrMapping != enums::RoRaBaCoCh,
@@ -1438,8 +1450,8 @@ DRAMInterface::DRAMInterface(const DRAMInterfaceParams &_p)
             fatal("Unable to parse HammerSim device map '%s': %s",
                   deviceFile, error.what());
         }
-        fatal_if(!device_map.is_object(),
-                 "HammerSim device map root must be a JSON object");
+        fatal_if(!device_map.is_object() || device_map.empty(),
+                 "HammerSim device map root must be a non-empty JSON object");
 
         for (auto& rank : ranks) {
             for (auto& bank : rank->banks) {
