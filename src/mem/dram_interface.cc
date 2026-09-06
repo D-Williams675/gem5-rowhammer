@@ -206,15 +206,11 @@ DRAMInterface::checkRowHammer(Bank& bank_ref, MemPacket* mem_pkt)
 
             bool bitflip = false;
             // I cannot flip this bit with a probability of 1. therefore, we
-            // need the second probability factor to cause bitflips
-            // the rng of c uses time. so for all simulated mem addresses for 1
-            // sec will have the same probability
-            struct timeval time;
-            gettimeofday(&time,NULL);
-
-            // srand((time.tv_sec * 1000) + (time.tv_usec / 1000));
-            // srand(time(nullptr));
-            // uint64_t prob = rand() % (halfDoubleProb * 10) + 1;
+            // need the second probability factor to cause bitflips.
+            // Probability comes from the seeded `generator` (NOT C
+            // rand()/wall-clock), so flips are reproducible under a fixed
+            // --seed. The old gettimeofday()+srand()+rand() scaffolding here was
+            // dead (its timeval was never read) and is removed -- audit 2.
             uint64_t prob = hd_distribution(generator);
 
             if (syntheticTraffic) {
@@ -285,15 +281,9 @@ DRAMInterface::checkRowHammer(Bank& bank_ref, MemPacket* mem_pkt)
             // We cannot flip this bit with a probability of 1. therefore, we
             // need the second probability factor to cause bitflips
 
-            // the rng of c uses time. so for all simulated mem addresses for 1
-            // sec will have the same probability
-
-            struct timeval time;
-            gettimeofday(&time,NULL);
-
-            // srand((time.tv_sec * 1000) + (time.tv_usec / 1000));
-            // uint64_t prob = rand() % (halfDoubleProb * 10) + 1;
-
+            // Probability from the seeded `generator` (reproducible under
+            // --seed); removed the dead gettimeofday()+rand() path whose
+            // timeval was never read -- audit 2.
             uint64_t prob = hd_distribution(generator);
 
             if (syntheticTraffic) {
@@ -370,13 +360,10 @@ DRAMInterface::checkRowHammer(Bank& bank_ref, MemPacket* mem_pkt)
             }
         }
 
-        struct timeval time;
-        gettimeofday(&time,NULL);
-
         if (single_sided) {
-            // tunable probability
-            // srand((time.tv_sec * 1000) + (time.tv_usec / 1000));
-            // uint64_t prob = rand() % (singleSidedProb * 10) + 1;
+            // tunable probability from the seeded `generator` (reproducible
+            // under --seed); removed the dead gettimeofday()+rand() path whose
+            // timeval was never read -- audit 2.
             uint64_t prob = single_sided_distribution(generator);
 
             if (syntheticTraffic) {
@@ -516,12 +503,10 @@ DRAMInterface::checkRowHammer(Bank& bank_ref, MemPacket* mem_pkt)
             }
         }
 
-        struct timeval time;
-        gettimeofday(&time,NULL);
         if (single_sided) {
-            // tunable probability
-            // srand((time.tv_sec * 1000) + (time.tv_usec / 1000));
-            // uint64_t prob = rand() % (singleSidedProb * 10) + 1;
+            // tunable probability from the seeded `generator` (reproducible
+            // under --seed); removed the dead gettimeofday()+rand() path whose
+            // timeval was never read -- audit 2.
             uint64_t prob = single_sided_distribution(generator);
 
             if (syntheticTraffic) {
