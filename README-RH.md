@@ -82,6 +82,10 @@ Important parameters:
   denominator per ACT (default: 100, or 1%).
 - `enable_memory_corruption`: Applies selected bit flips to gem5's backing
   memory. It requires `enable_rowhammer=True`.
+- `corruption_seed`: Seeds the private generator used to select the corrupted
+  bit within each chosen byte (default: 5489). This stream is intentionally
+  separate so enabling functional corruption does not change HammerSim's
+  fault opportunities or weak-column selections at a fixed gem5 random seed.
 - `enable_ecc`: Enables simplified functional SECDED. It requires functional
   corruption and `ecc_algorithm=1`.
 - `trr_stat_dump` / `trr_stat_file`: Record each modeled TRR or PARA neighbor
