@@ -80,6 +80,18 @@ jobs:
           grep -Eq 'rowHammerEccDetected[[:space:]]+1([[:space:]]|$)' \
             m5out-hammersim/stats.txt
 
+      - name: Verify corruption RNG isolation
+        run: |
+          build/X86/gem5.opt --outdir=m5out-rng-model \
+            --random-seed=2026 \
+            configs/dram/rowhammer/TrafficGen/hammersim_rng_smoke.py
+          build/X86/gem5.opt --outdir=m5out-rng-corruption \
+            --random-seed=2026 \
+            configs/dram/rowhammer/TrafficGen/hammersim_rng_smoke.py \
+            --memory-corruption
+          diff -u m5out-rng-model/rowhammer.trace \
+            m5out-rng-corruption/rowhammer.trace
+
       - name: Run HammerSim mitigation smoke tests
         run: |
           for variant in 1 2 4 5 6; do
@@ -115,5 +127,6 @@ jobs:
             build/X86/gem5.build/scons_config.log
             m5out-stock/
             m5out-hammersim/
+            m5out-rng-*/
             m5out-trr-*/
             m5out-trr-3.log

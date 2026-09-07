@@ -53,6 +53,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "base/random.hh"
 #include "mem/drampower.hh"
 #include "mem/mem_interface.hh"
 #include "params/DRAMInterface.hh"
@@ -571,6 +572,7 @@ class DRAMInterface : public MemInterface
     const uint64_t doubleSidedProb;
 
     const bool enableMemoryCorruption;
+    Random corruptionRandom;
 
     // to implement ECC, there are a couple of parameters that the user needs
     // to specify

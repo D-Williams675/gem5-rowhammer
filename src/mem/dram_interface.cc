@@ -605,7 +605,7 @@ DRAMInterface::doMemoryCorruption(MemPacket* mem_pkt, uint8_t bank,
         }
     }
 
-    const uint8_t corrupt_bit = random_mt.random<uint8_t>(0, 7);
+    const uint8_t corrupt_bit = corruptionRandom.random<uint8_t>(0, 7);
     *host_addr ^= static_cast<uint8_t>(1U << corrupt_bit);
     stats.rowHammerCorruptedBitCount++;
     DPRINTF(RhCorruption, "Aggressor row %d and Victim row %d\n", mem_pkt->row,
@@ -1347,6 +1347,7 @@ DRAMInterface::DRAMInterface(const DRAMInterfaceParams &_p)
       halfDoubleActivationThreshold(_p.half_double_activation_threshold),
       doubleSidedProb(_p.double_sided_prob),
       enableMemoryCorruption(_p.enable_memory_corruption),
+      corruptionRandom(_p.corruption_seed),
       enableEcc(_p.enable_ecc),
       eccAlgorithm(_p.ecc_algorithm),
       para_refreshes(0),

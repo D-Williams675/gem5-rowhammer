@@ -158,7 +158,12 @@ class DRAMInterface(MemInterface):
 
     enable_memory_corruption = Param.Bool(
         False,
-        "Set this to True enable memory corruption"
+        "Set this to True to enable memory corruption",
+    )
+    corruption_seed = Param.UInt32(
+        5489,
+        "Seed for corruption bit selection (independent of HammerSim's "
+        "fault-selection RNG)",
     )
 
     # Retained so existing HammerSim configurations remain compatible.
