@@ -83,10 +83,8 @@ jobs:
       - name: Verify corruption RNG isolation
         run: |
           build/X86/gem5.opt --outdir=m5out-rng-model \
-            --random-seed=2026 \
             configs/dram/rowhammer/TrafficGen/hammersim_rng_smoke.py
           build/X86/gem5.opt --outdir=m5out-rng-corruption \
-            --random-seed=2026 \
             configs/dram/rowhammer/TrafficGen/hammersim_rng_smoke.py \
             --memory-corruption
           diff -u m5out-rng-model/rowhammer.trace \
