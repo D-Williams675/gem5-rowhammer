@@ -39,9 +39,10 @@ Usage:
 ```
 scons build/X86/gem5.opt
 ./build/X86/gem5.opt \
-    configs/example/gem5_library/x86-npb-benchmarks.py \
+    configs/dram/rowhammer/FSConfigs/benchmarks/x86-npb-benchmarks.py \
     --benchmark <benchmark_name> \
-    --size <benchmark_class>
+    --size <benchmark_class> \
+    --take-checkpoint <true|false>
 ```
 """
 import os
@@ -56,26 +57,12 @@ from gem5.utils.requires import requires
 from gem5.components.boards.x86_board import X86Board
 from gem5.components.memory import SingleChannelDDR4_2400
 from gem5.components.processors.simple_processor import SimpleProcessor
-from gem5.components.processors.simple_switchable_processor import (
-    SimpleSwitchableProcessor,
-)
 from gem5.components.processors.cpu_types import CPUTypes
 from gem5.isas import ISA
 from gem5.coherence_protocol import CoherenceProtocol
-from gem5.resources.resource import obtain_resource
-from gem5.simulate.simulator import Simulator
-from gem5.simulate.simulator import ExitEvent
-
 from gem5.resources.resource import CustomResource, CustomDiskImageResource
-
-from m5.stats.gem5stats import get_simstat
+from gem5.simulate.exit_event import ExitEvent
 from m5.util import warn
-
-requires(
-    isa_required=ISA.X86,
-    coherence_protocol_required=CoherenceProtocol.MESI_TWO_LEVEL,
-    kvm_required=True,
-)
 
 # Following are the list of benchmark programs for npb.
 
@@ -104,6 +91,32 @@ parser.add_argument(
     help="Input the benchmark program to execute.",
     choices=benchmark_choices,
 )
+parser.add_argument(
+    "--kernel",
+    default=os.environ.get(
+        "HAMMERSIM_KERNEL",
+        os.path.expanduser("~/.cache/gem5/x86-linux-kernel-5.4.49"),
+    ),
+    help="Path to the x86 kernel (or set HAMMERSIM_KERNEL).",
+)
+parser.add_argument(
+    "--disk-image",
+    default=os.environ.get(
+        "HAMMERSIM_NPB_DISK_IMAGE",
+        os.path.expanduser("~/.cache/gem5/x86-npb"),
+    ),
+    help="Path to the NPB disk image (or set HAMMERSIM_NPB_DISK_IMAGE).",
+)
+parser.add_argument(
+    "--guest-npb-dir",
+    default="/home/gem5/NPB3.3-OMP/bin",
+    help="Directory containing NPB binaries inside the guest.",
+)
+parser.add_argument(
+    "--root-partition",
+    default=os.environ.get("HAMMERSIM_ROOT_PARTITION", "1"),
+    help="Root partition number inside the NPB disk image (default: 1).",
+)
 
 parser.add_argument(
     "--size",
@@ -119,15 +132,35 @@ parser.add_argument(
     help="Optionally put the maximum number of ticks to execute during the "
     "ROI. It accepts an integer value.",
 )
-parser.add_argument(          
-    "--take-checkpoint",        
-    type=str,                 
-    required=True,            
+parser.add_argument(
+    "--take-checkpoint",
+    type=str,
+    required=True,
     choices=["true", "false"],
-    help=""                   
-)                             
+    help="Create a KVM checkpoint (true) or restore it for the ROI (false).",
+)
+parser.add_argument(
+    "--checkpoint-path",
+    default=os.environ.get("HAMMERSIM_NPB_CHECKPOINT"),
+    help="Checkpoint directory shared by the create and restore runs.",
+)
+parser.add_argument(
+    "--cpu-type",
+    choices=["timing", "o3"],
+    default="timing",
+    help="CPU model to use when restoring the KVM-created checkpoint.",
+)
 
 args = parser.parse_args()
+if args.ticks is not None and args.ticks <= 0:
+    parser.error("--ticks must be greater than zero")
+
+take_checkpoint = args.take_checkpoint == "true"
+requires(
+    isa_required=ISA.X86,
+    coherence_protocol_required=CoherenceProtocol.MESI_TWO_LEVEL,
+    kvm_required=True if take_checkpoint else False,
+)
 
 # The simulation may fail in the case of `mg` with class C as it uses 3.3 GB
 # of memory (more information is availabe at https://arxiv.org/abs/2010.13216).
@@ -171,6 +204,10 @@ cache_hierarchy = MESITwoLevelCacheHierarchy(
 memory = SingleChannelDDR4_2400(size="3GB")
 
 # Setup the rowhammer parameters to simulate
+memory._dram_class.enable_rowhammer = True
+memory._dram_class.device_file = os.path.join(
+    os.getcwd(), "util/hammersim/synthetic-device-map.json"
+)
 memory._dram_class.trr_variant = 0
 
 memory._dram_class.ranks_per_channel = 1
@@ -189,19 +226,19 @@ memory._dram_class.enable_memory_corruption = False
 # we start with KVM cores to simulate the OS boot, then switch to the Timing
 # cores for the command we wish to run after boot.
 
-take_checkpoint = {"true": True, "false": False}[args.take_checkpoint]
-processor = None
-if take_checkpoint == True:
-    processor = SimpleProcessor(cpu_type=CPUTypes.KVM, isa=ISA.X86,
-                                num_cores=8)
+if take_checkpoint:
+    processor = SimpleProcessor(
+        cpu_type=CPUTypes.KVM, isa=ISA.X86, num_cores=8
+    )
 else:
-    if "timing" in m5.options.outdir:
-        processor = SimpleProcessor(cpu_type=CPUTypes.TIMING, isa=ISA.X86,
-                                num_cores=8)
+    if args.cpu_type == "timing":
+        processor = SimpleProcessor(
+            cpu_type=CPUTypes.TIMING, isa=ISA.X86, num_cores=8
+        )
     else:
-        assert("o3" in m5.options.outdir)
-        processor = SimpleProcessor(cpu_type=CPUTypes.O3, isa=ISA.X86,
-                                num_cores=8)
+        processor = SimpleProcessor(
+            cpu_type=CPUTypes.O3, isa=ISA.X86, num_cores=8
+        )
 
 # Here we setup the board. The X86Board allows for Full-System X86 simulations
 
@@ -225,7 +262,8 @@ board = X86Board(
 # properly.
 
 command = (
-    f"/home/gem5/NPB3.3-OMP/bin/{args.benchmark}.{args.size}.x;"
+    "m5 exit;"
+    + f"{args.guest_npb_dir}/{args.benchmark}.{args.size}.x;"
     + "sleep 5;"
     + "m5 exit;"
 )
@@ -233,120 +271,87 @@ command = (
 board.set_kernel_disk_workload(
     # The x86 linux kernel will be automatically downloaded to the
     # `~/.cache/gem5` directory if not already present.
-    kernel=CustomResource(
-        os.path.join(
-            os.path.expanduser("~"), ".cache/gem5/x86-linux-kernel-5.4.49"
-        )
-    ),
+    kernel=CustomResource(args.kernel),
     # The x86-npb image will be automatically downloaded to the
     # `~/.cache/gem5` directory if not already present.
     disk_image=CustomDiskImageResource(
-        os.path.join("/home/kaustavg/.cache/gem5/x86-npb"),
-        root_partition="1"
+        args.disk_image,
+        root_partition=args.root_partition,
     ),
     readfile_contents=command,
 )
 
-# Getting rid of the Simulator object.
+# Instantiate manually so the same script can create a KVM checkpoint and
+# restore it with a detailed CPU model in a later invocation.
 board._pre_instantiate()
 root = Root(full_system=True, board=board)
-board._post_instantiate()
+checkpoint_path = os.path.abspath(
+    args.checkpoint_path or os.path.join(m5.options.outdir, "checkpoint")
+)
 
-# Make sure that the checkpoint path is set
-print(m5.options.outdir)
-this_path = os.path.join(os.getcwd(), m5.options.outdir)
-print(this_path)
-checkpoint_path = os.path.join(this_path, "checkpoint")
-print(checkpoint_path)
-
-if take_checkpoint == True:
-    root.sim_quantum = int(1e9)
+if take_checkpoint:
+    m5.ticks.fixGlobalFrequency()
+    root.sim_quantum = m5.ticks.fromSeconds(0.001)
     m5.instantiate()
-
-    m5.simulate()
+    board._post_instantiate()
+    exit_event = m5.simulate()
+    if "m5_exit" not in exit_event.getCause():
+        raise RuntimeError(
+            "Expected the pre-benchmark m5 exit before checkpointing, got: "
+            f"{exit_event.getCause()}"
+        )
+    print(
+        f"Checkpointing @ tick {m5.curTick()} because "
+        f"{exit_event.getCause()}"
+    )
     m5.checkpoint(checkpoint_path)
 else:
+    if not os.path.isdir(checkpoint_path):
+        parser.error(
+            f"checkpoint does not exist: {checkpoint_path}; create it with "
+            "--take-checkpoint true or pass --checkpoint-path"
+        )
     m5.instantiate(checkpoint_path)
-    m5.simulate()
-"""
+    board._post_instantiate()
+    roi_start_tick = None
+    roi_start_wall = None
 
-# The first exit_event ends with a `workbegin` cause. This means that the
-# system started successfully and the execution on the program started.
-def handle_workbegin():
-    print("Done booting Linux")
-    print("Resetting stats at the start of ROI!")
+    while True:
+        max_ticks = (
+            args.ticks
+            if roi_start_tick is not None and args.ticks
+            else m5.MaxTick
+        )
+        exit_event = m5.simulate(max_ticks)
+        exit_type = ExitEvent.translate_exit_status(exit_event.getCause())
 
-    m5.stats.reset()
+        if exit_type == ExitEvent.WORKBEGIN:
+            if roi_start_tick is not None:
+                raise RuntimeError("NPB emitted a second work-begin event")
+            roi_start_tick = m5.curTick()
+            roi_start_wall = time.time()
+            m5.stats.reset()
+            continue
 
-    # We have completed up to this step using KVM cpu. Now we switch to timing
-    # cpu for detailed simulation.
+        if exit_type == ExitEvent.WORKEND:
+            if roi_start_tick is None:
+                raise RuntimeError("NPB emitted work-end before work-begin")
+            break
 
-    # # Next, we need to check if the user passed a value for --ticks. If yes,
-    # then we limit out execution to this number of ticks during the ROI.
-    # Otherwise, we simulate until the ROI ends.
-    processor.switch()
-    if args.ticks:
-        # schedule an exit event for this amount of ticks in the future.
-        # The simulation will then continue.
-        m5.scheduleTickExitFromCurrent(args.ticks)
-    yield False
+        if exit_type in (ExitEvent.MAX_TICK, ExitEvent.SCHEDULED_TICK):
+            if roi_start_tick is None:
+                raise RuntimeError("Simulation limit reached before NPB ROI")
+            break
 
-
-# The next exit_event is to simulate the ROI. It should be exited with a cause
-# marked by `workend`.
-
-
-# We exepect that ROI ends with `workend` or `simulate() limit reached`.
-def handle_workend():
-    print("Dump stats at the end of the ROI!")
+        raise RuntimeError(
+            "Expected NPB work-begin/work-end events, got: "
+            f"{exit_event.getCause()}"
+        )
 
     m5.stats.dump()
-    yield True
-
-
-simulator = Simulator(
-    board=board,
-    on_exit_event={
-        ExitEvent.WORKBEGIN: handle_workbegin(),
-        ExitEvent.WORKEND: handle_workend(),
-    },
-)
-
-# We maintain the wall clock time.
-
-globalStart = time.time()
-
-print("Running the simulation")
-print("Using KVM cpu")
-
-# We start the simulation.
-simulator.run()
-
-# We need to note that the benchmark is not executed completely till this
-# point, but, the ROI has. We collect the essential statistics here before
-# resuming the simulation again.
-
-# Simulation is over at this point. We acknowledge that all the simulation
-# events were successful.
-print("All simulation events were successful.")
-# We print the final simulation statistics.
-
-print("Done with the simulation")
-print()
-print("Performance statistics:")
-
-# manually calculate ROI time if ticks arg is used in case the
-# entire ROI wasn't simulated
-if args.ticks:
-    print(f"Simulated time in ROI (to tick): {args.ticks/ 1e12}s")
-else:
-    print(f"Simulated time in ROI: {simulator.get_roi_ticks()[0] / 1e12}s")
-
-print(
-    f"Ran a total of {simulator.get_current_tick() / 1e12} simulated seconds"
-)
-print(
-    "Total wallclock time: %.2fs, %.2f min"
-    % (time.time() - globalStart, (time.time() - globalStart) / 60)
-)
-"""
+    elapsed_ticks = m5.curTick() - roi_start_tick
+    elapsed_wall = time.time() - roi_start_wall
+    print(
+        f"Stopped @ tick {m5.curTick()} because {exit_event.getCause()}; "
+        f"ROI ticks: {elapsed_ticks}; wall time: {elapsed_wall:.2f}s"
+    )

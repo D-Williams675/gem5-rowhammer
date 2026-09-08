@@ -44,6 +44,7 @@ class DRAM_TEST(DDR4_2400_8x8):
     The rowbuffer size is 1KiB
     """
     # Use the correct device map
+    enable_rowhammer = True
     device_file = os.path.join(os.getcwd(),
                     "util/hammersim/row_experiment_vendor_b/dimm2.bank-4.json")
     ranks_per_channel = 1

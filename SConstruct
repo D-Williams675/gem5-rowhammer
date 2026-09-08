@@ -414,8 +414,6 @@ for variant_path in variant_paths:
 
         # We always compile using C++17
         env.Append(CXXFLAGS=['-std=c++17'])
-        env.Append(CXXFLAGS=['-I/`pwd`/ext/json/json/include/'])
-
         if sys.platform.startswith('freebsd'):
             env.Append(CCFLAGS=['-I/usr/local/include'])
             env.Append(CXXFLAGS=['-I/usr/local/include'])

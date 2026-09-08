@@ -1,0 +1,130 @@
+name: HammerSim CI
+
+on:
+  push:
+    branches:
+      - develop
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: hammersim-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-smoke-test:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential m4 scons libboost-all-dev libhdf5-dev libpng-dev \
+            libprotobuf-dev pkg-config protobuf-compiler python3-dev \
+            zlib1g zlib1g-dev
+
+      - name: Validate Python and device maps
+        run: |
+          python3 -m compileall -q configs util
+          find util/hammersim -name '*.json' -print0 | \
+            xargs -0 python3 util/hammersim/validate_device_map.py \
+              --row-buffer-size 8192
+
+      - name: Build gem5 (X86)
+        run: |
+          if ! /usr/bin/scons --ignore-style build/X86/gem5.opt -j2; then
+            find build -name scons_config.log -print -exec tail -n 250 {} \;
+            exit 1
+          fi
+
+      - name: Run stock DRAM smoke test
+        run: |
+          build/X86/gem5.opt --outdir=m5out-stock \
+            configs/dram/rowhammer/TrafficGen/test-scripts/simple_dram.py
+
+      - name: Load full-system and SE configurations
+        run: |
+          for config in \
+            configs/dram/rowhammer/FSConfigs/benchmarks/x86-npb-benchmarks.py \
+            configs/dram/rowhammer/FSConfigs/blacksmith/x86-blacksmith-with-kvm.py \
+            configs/dram/rowhammer/FSConfigs/rowhammer-test/x86-rowhammer-with-kvm.py \
+            configs/dram/rowhammer/FSConfigs/rowhammer-test/x86-rowhammer-with-kvm-no-cache.py \
+            configs/dram/rowhammer/FSConfigs/test-scripts/x86-rowhammer-fs.py \
+            configs/dram/rowhammer/FSConfigs/test-scripts/x86-rowhammer-test.py; do
+            build/X86/gem5.opt "$config" --help >/dev/null
+          done
+
+      - name: Run HammerSim corruption and ECC smoke test
+        run: |
+          build/X86/gem5.opt --outdir=m5out-hammersim \
+            configs/dram/rowhammer/TrafficGen/hammersim_smoke.py
+          grep -E 'rowHammer(TotalBitflips|SingleSidedBitflips|DoubleSidedBitflips|HalfDoubleBitflips|CorruptedBitCount|EccCorrected|EccDetected)' \
+            m5out-hammersim/stats.txt
+          grep -Eq 'rowHammerTotalBitflips[[:space:]]+6([[:space:]]|$)' \
+            m5out-hammersim/stats.txt
+          grep -Eq 'rowHammerSingleSidedBitflips[[:space:]]+4([[:space:]]|$)' \
+            m5out-hammersim/stats.txt
+          grep -Eq 'rowHammerDoubleSidedBitflips[[:space:]]+1([[:space:]]|$)' \
+            m5out-hammersim/stats.txt
+          grep -Eq 'rowHammerHalfDoubleBitflips[[:space:]]+1([[:space:]]|$)' \
+            m5out-hammersim/stats.txt
+          grep -Eq 'rowHammerCorruptedBitCount[[:space:]]+6([[:space:]]|$)' \
+            m5out-hammersim/stats.txt
+          grep -Eq 'rowHammerEccCorrected[[:space:]]+4([[:space:]]|$)' \
+            m5out-hammersim/stats.txt
+          grep -Eq 'rowHammerEccDetected[[:space:]]+1([[:space:]]|$)' \
+            m5out-hammersim/stats.txt
+
+      - name: Verify corruption RNG isolation
+        run: |
+          build/X86/gem5.opt --outdir=m5out-rng-model \
+            configs/dram/rowhammer/TrafficGen/hammersim_rng_smoke.py
+          build/X86/gem5.opt --outdir=m5out-rng-corruption \
+            configs/dram/rowhammer/TrafficGen/hammersim_rng_smoke.py \
+            --memory-corruption
+          diff -u m5out-rng-model/rowhammer.trace \
+            m5out-rng-corruption/rowhammer.trace
+
+      - name: Run HammerSim mitigation smoke tests
+        run: |
+          for variant in 1 2 4 5 6; do
+            outdir="m5out-trr-${variant}"
+            build/X86/gem5.opt --outdir="$outdir" \
+              configs/dram/rowhammer/TrafficGen/hammersim_trr_smoke.py \
+              --variant "$variant"
+            grep 'rowHammerInhibitorTriggers' "$outdir/stats.txt"
+            grep 'rowHammerTotalBitflips' "$outdir/stats.txt"
+            cat "$outdir/trr.trace"
+            grep -Eq \
+              'rowHammerInhibitorTriggers[[:space:]]+[1-9][0-9]*([[:space:]]|$)' \
+              "$outdir/stats.txt"
+            grep -Eq 'rowHammerTotalBitflips[[:space:]]+0([[:space:]]|$)' \
+              "$outdir/stats.txt"
+            grep -Eq '^[0-9]+ [0-9]+ [0-9]+ [0-9]+ [0-9]+ [0-9]+$' \
+              "$outdir/trr.trace"
+          done
+          if build/X86/gem5.opt --outdir=m5out-trr-3 \
+              configs/dram/rowhammer/TrafficGen/hammersim_trr_smoke.py \
+              --variant 3 >m5out-trr-3.log 2>&1; then
+            echo "unsupported TRR variant 3 unexpectedly succeeded"
+            exit 1
+          fi
+          grep -q 'Unsupported trr_variant 3' m5out-trr-3.log
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hammersim-ci-logs
+          path: |
+            build/X86/gem5.build/scons_config.log
+            m5out-stock/
+            m5out-hammersim/
+            m5out-rng-*/
+            m5out-trr-*/
+            m5out-trr-3.log

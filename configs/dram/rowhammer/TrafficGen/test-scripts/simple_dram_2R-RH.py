@@ -26,9 +26,14 @@
 
 from m5.objects import *
 import m5
+import os
 
 
 class DRAM_TEST(DDR4_2400_16x4):
+    enable_rowhammer = True
+    device_file = os.path.join(
+        os.getcwd(), "util/hammersim/synthetic-device-map.json"
+    )
     ranks_per_channel = 1
     # companion_threshold = 2
     # trr_threshold = 4
