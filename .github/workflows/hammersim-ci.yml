@@ -116,6 +116,10 @@ jobs:
           fi
           grep -q 'Unsupported trr_variant 3' m5out-trr-3.log
 
+      - name: Run HammerSim property tests (invariants I1-I7)
+        run: |
+          python3 tests/hammersim/run_properties.py build/X86/gem5.opt
+
       - name: Upload logs on failure
         if: failure()
         uses: actions/upload-artifact@v4
@@ -128,3 +132,57 @@ jobs:
             m5out-rng-*/
             m5out-trr-*/
             m5out-trr-3.log
+
+  sanitizer-build:
+    # Layer 1 of VERIFICATION.md: build with AddressSanitizer + UBSan and run
+    # the whole HammerSim suite under it. This is what auto-catches the
+    # memory-safety class of bugs (out-of-bounds, use-after-free, over-read).
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential m4 scons libboost-all-dev libhdf5-dev libpng-dev \
+            libprotobuf-dev pkg-config protobuf-compiler python3-dev \
+            zlib1g zlib1g-dev
+
+      - name: Build gem5 (X86) with ASan + UBSan
+        run: |
+          if ! /usr/bin/scons --ignore-style --with-asan --with-ubsan \
+              build/X86/gem5.opt -j2; then
+            find build -name scons_config.log -print -exec tail -n 250 {} \;
+            exit 1
+          fi
+
+      - name: Run HammerSim suite under sanitizers
+        env:
+          # gem5 intentionally leaks at exit, so disable leak detection and keep
+          # the memory-safety checks that matter (overflow / use-after-free).
+          ASAN_OPTIONS: detect_leaks=0:halt_on_error=1:abort_on_error=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: |
+          build/X86/gem5.opt --outdir=m5out-stock \
+            configs/dram/rowhammer/TrafficGen/test-scripts/simple_dram.py
+          build/X86/gem5.opt --outdir=m5out-hammersim \
+            configs/dram/rowhammer/TrafficGen/hammersim_smoke.py
+          for variant in 1 2 4 5 6; do
+            build/X86/gem5.opt --outdir="m5out-trr-${variant}" \
+              configs/dram/rowhammer/TrafficGen/hammersim_trr_smoke.py \
+              --variant "$variant"
+          done
+          python3 tests/hammersim/run_properties.py build/X86/gem5.opt
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hammersim-sanitizer-logs
+          path: |
+            build/X86/gem5.build/scons_config.log
+            m5out-*/
