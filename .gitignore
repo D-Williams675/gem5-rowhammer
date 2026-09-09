@@ -8,6 +8,9 @@ cscope.out
 .*.swp
 .*.swo
 m5out
+# HammerSim CI / verification run artifacts (m5out-stock, m5out-trr-*,
+# m5out-san-* directories and their .log files).
+m5out-*
 /src/doxygen/html
 /ext/dramsim2/DRAMSim2
 /ext/mcpat/regression/*/*.out
