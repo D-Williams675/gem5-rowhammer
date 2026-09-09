@@ -453,6 +453,18 @@ for variant_path in variant_paths:
                              '-Wno-error=deprecated',
                             ])
 
+        # GCC's static -Warray-bounds / -Wstringop-overflow analysis emits
+        # false positives inside third-party headers (pybind11) when the
+        # sanitizers change inlining, which otherwise breaks the ASan/UBSan
+        # build. Downgrade just these two from error to warning; this is a
+        # compile-time static check only -- runtime AddressSanitizer still
+        # catches any real out-of-bounds access. GCC-only: the warning names
+        # differ under clang.
+        if env['GCC']:
+            env.Append(CCFLAGS=['-Wno-error=array-bounds',
+                                 '-Wno-error=stringop-overflow',
+                                ])
+
     else:
         error('\n'.join((
               "Don't know what compiler options to use for your compiler.",
